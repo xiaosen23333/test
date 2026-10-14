@@ -163,13 +163,33 @@ for f in ('main.m', 'front_ios.m', 'Info.plist'):
 check('work/tools/dmpack.py', os.path.exists(os.path.join(ROOT, r'work\tools\dmpack.py')))
 check('work/tools/build_all.ps1', os.path.exists(os.path.join(ROOT, r'work\tools\build_all.ps1')))
 # 壳 ipa 是否存在（这一步是已知缺口）
+# !! 第 37 轮这里误报了 !! 第一版只按后缀 .ipa 找，结果把无关的 AirCard-iOS.ipa
+#    当成了「壳」并判成 OK。**「文件存在」不等于「条件满足」** ——
+#    真正的判据是：ipa 里必须有 Payload/*.app/，且那个 app 里有 DmGame 可执行文件。
 shells = []
+cand = []
 for d in (os.path.expanduser('~/Downloads'), os.path.expanduser('~/Desktop'), ROOT):
     if os.path.isdir(d):
-        shells += [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.ipa')]
-check('壳 ipa 存在', len(shells) > 0,
-      ('找到 %d 个: %s' % (len(shells), ', '.join(os.path.basename(s) for s in shells))) if shells else
-      '**没有** —— 这一步需要 macOS + Xcode')
+        cand += [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.ipa')]
+import zipfile
+for p in cand:
+    try:
+        with zipfile.ZipFile(p) as z:
+            names = z.namelist()
+        has_app = any(n.startswith('Payload/') and '.app/' in n for n in names)
+        # 我们的壳里应当有 DmGame 这个可执行文件
+        has_dmgame = any('DmGame' in n for n in names)
+        if has_app and has_dmgame:
+            shells.append((p, '有 Payload/*.app 且含 DmGame'))
+        else:
+            print('  （无关的 ipa，不算壳: %s —— %s）' % (
+                os.path.basename(p),
+                '没有 Payload/*.app' if not has_app else '没有 DmGame'))
+    except Exception as e:
+        print('  （打不开的 ipa: %s —— %s）' % (os.path.basename(p), e))
+check('壳 ipa 存在（且含 Payload/*.app/DmGame）', len(shells) > 0,
+      ('找到: %s' % ', '.join(os.path.basename(s) for s, _ in shells)) if shells else
+      '**没有** —— 这一步需要 macOS + Xcode（见 work/ios/给朋友的操作说明.md）')
 
 print()
 print('=' * 74)

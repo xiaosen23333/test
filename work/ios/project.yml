@@ -35,6 +35,7 @@ targets:
       # 这类最难查的问题。
       - path: ../host/hle.c
       - path: ../host/loader.c
+      - path: ../host/hle_host_dir.c
       - path: ../host/hle_nn.c
       - path: ../host/hle_nn_fs.c
       - path: ../host/hle_nn_fs2.c

@@ -22,7 +22,7 @@ Push-Location $B
 
 # ---- 宿主源码（顺序无关，一次编译）----
 $SRC = @(
-  'hle.c','loader.c',
+  'hle.c','loader.c','hle_host_dir.c',
   'hle_nn.c','hle_nn_fs.c','hle_nn_fs2.c','hle_nn_thread.c','hle_nn_util.c',
   'hle_nn_more.c','hle_nn_audio.c','nn_impl_table.c',
   'nvn_names.c','hle_nvn.c','hle_nvn_obj.c','hle_nvn_cmd.c','hle_nvn_replay.c',

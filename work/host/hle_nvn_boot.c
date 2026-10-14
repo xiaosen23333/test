@@ -39,6 +39,7 @@
 #include "hle_nvn_cmd.h"
 #include "hle_nvn_metal.h"
 #include "hle_nvn_glslc.h"
+#include "hle_host_dir.h"      /* dm_host_res_dir()：资源目录（iOS 上必须是绝对路径） */
 
 /* hle_nn_fs.c 提供（该文件没有配套头文件，故在此声明） */
 extern void dm_nn_fs_set_romfs_root(const char *dir);
@@ -144,9 +145,14 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
     g_ctx.key_values[DM_KEY_KTLR]  = dm_thread_key(DM_KEY_KTLR);
     g_ctx.key_values[DM_KEY_KGATE] = dm_thread_key(DM_KEY_KGATE);
 
-    /* 模块二进制放在与宿主同一目录的 dm/ 下（包内布局见 work/tools/dmpack.py） */
-    const char *dir = getenv("DM_MODULE_DIR");
-    if (!dir) dir = "dm";
+    /* 模块二进制放在资源目录下（包内布局见 work/tools/dmpack.py）。
+     *
+     * !! 第 41 轮修正 !! 原来这里是 `getenv("DM_MODULE_DIR")`，否则用相对路径 "dm"。
+     *   Windows 上开发时当前目录就是工作目录，所以 17 个自测全过；
+     *   但 **iOS 上 App 的当前工作目录不是 bundle 目录** ——
+     *   `fopen("dm/main.patched.bin")` 会失败，表现为「装上了但一起就报找不到游戏程序」。
+     *   现在统一走 dm_host_res_dir()：Apple 上由 iOS 外壳用 NSBundle 给出绝对路径。 */
+    const char *dir = dm_host_res_dir();
 
     char bin[1400], fix[1400];
     for (unsigned i = 0; i < DM_NMODS; i++) {
@@ -220,7 +226,7 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
        出包时会被拷到与模块同级的 dm/ 下（见 work/tools/dmpack.py）。 */
     {
         const char *sdir = getenv("DM_SHADER_DIR");
-        if (!sdir) sdir = dir;
+        if (!sdir || !sdir[0]) sdir = dir;   /* 默认与模块同目录（包内 dm/） */
         char map[1400], metal[1400];
         snprintf(map,   sizeof map,   "%s/shader_map.tsv", sdir);
         snprintf(metal, sizeof metal, "%s/metal", sdir);

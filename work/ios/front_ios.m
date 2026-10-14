@@ -223,6 +223,25 @@ static void romfs_dir(char *out, size_t cap) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 资源目录（宿主用它找 dm/ 下的模块与着色器数据）                     */
+/* ------------------------------------------------------------------ */
+
+/* 为什么需要这个：iOS 上 App 的**当前工作目录不是 bundle 目录**，
+   所以宿主里 `fopen("dm/main.patched.bin")` 这种相对路径会失败 ——
+   表现为「装上了但一起就报找不到游戏程序」。
+   这里用 NSBundle 给出**绝对路径**，与 dmpack.py 把内容放进
+   Payload/DmGame.app/dm/ 的布局对应。 */
+const char *dm_ios_res_dir(void) {
+    static char buf[1024];
+    if (buf[0]) return buf;                            /* 缓存一次 */
+    NSString *p = [NSBundle mainBundle].bundlePath;
+    const char *c = p.UTF8String;
+    if (c && c[0]) snprintf(buf, sizeof buf, "%s/dm", c);   /* 内容在 bundle 下的 dm/ */
+    else           snprintf(buf, sizeof buf, "dm");         /* 兜底：退回相对路径 */
+    return buf;
+}
+
+/* ------------------------------------------------------------------ */
 /* 启动                                                                */
 /* ------------------------------------------------------------------ */
 
