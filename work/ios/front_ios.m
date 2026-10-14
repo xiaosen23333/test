@@ -209,28 +209,29 @@ void dm_ios_enter_foreground(void) {
 void dm_ios_memory_warning(void) { }
 
 /* ------------------------------------------------------------------ */
-/* RomFS 目录                                                          */
+/* RomFS / 资源目录                                                    */
 /* ------------------------------------------------------------------ */
 
-/* 游戏资源不进安装包（约 5 GB），而是用户拷进 App 的 Documents。
-   这里把 Documents/data 作为 RomFS 根，与 nn::fs 的路径映射配合：
-     客体 "/data/database/shader.dat" -> <romfs>/data/database/shader.dat */
-static void romfs_dir(char *out, size_t cap) {
+/* Documents 目录的绝对路径。
+ * App 的「文稿」目录 —— 用户用 iTunes「文件共享」或「文件」App 往里拷东西。
+ * （Info.plist 里开了 UIFileSharingEnabled，所以它可见。） */
+const char *dm_ios_docs_dir(void) {
+    static char buf[1024];
+    if (buf[0]) return buf;                            /* 缓存一次 */
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                          NSUserDomainMask, YES);
     NSString *docs = paths.count ? paths[0] : NSTemporaryDirectory();
-    snprintf(out, cap, "%s", docs.UTF8String ? docs.UTF8String : "/tmp");
+    const char *c = docs.UTF8String;
+    snprintf(buf, sizeof buf, "%s", (c && c[0]) ? c : "/tmp");
+    return buf;
 }
 
-/* ------------------------------------------------------------------ */
-/* 资源目录（宿主用它找 dm/ 下的模块与着色器数据）                     */
-/* ------------------------------------------------------------------ */
-
-/* 为什么需要这个：iOS 上 App 的**当前工作目录不是 bundle 目录**，
-   所以宿主里 `fopen("dm/main.patched.bin")` 这种相对路径会失败 ——
-   表现为「装上了但一起就报找不到游戏程序」。
-   这里用 NSBundle 给出**绝对路径**，与 dmpack.py 把内容放进
-   Payload/DmGame.app/dm/ 的布局对应。 */
+/* 模块与着色器所在的目录：<bundle>/dm
+ *
+ * 为什么需要它：iOS 上 App 的**当前工作目录不是 bundle 目录**，
+ * 所以宿主里 `fopen("dm/main.patched.bin")` 这种相对路径会失败 ——
+ * 表现为「装上了但一起就报找不到游戏程序」。
+ * 这里用 NSBundle 给出**绝对路径**，与 dmpack.py 的包内布局对应。 */
 const char *dm_ios_res_dir(void) {
     static char buf[1024];
     if (buf[0]) return buf;                            /* 缓存一次 */
@@ -246,10 +247,16 @@ const char *dm_ios_res_dir(void) {
 /* ------------------------------------------------------------------ */
 
 int dm_ios_start(void) {
-    char romfs[1024];
-    romfs_dir(romfs, sizeof romfs);
-    /* 存档放在同一层的 dm-save（nn::fs 会建） */
+    /* 游戏数据目录由宿主自己决定（dm_host_data_dir）：
+     *   包里内置的 data/ 优先 → 没有再退回 Documents。
+     * 这样「打包时放了启动集」的情况下，用户装上就能跑，不用手工拷文件。 */
+    NSString *docs = [NSString stringWithUTF8String:dm_ios_docs_dir()];
     char save[1200];
-    snprintf(save, sizeof save, "%s/../dm-save", romfs);
+    snprintf(save, sizeof save, "%s/../dm-save", docs.UTF8String ? docs.UTF8String : "/tmp");
+
+    /* romfs 参数传 NULL 让宿主用 dm_host_data_dir() 的判定；
+       但为兼容旧签名，这里直接传我们算好的路径 —— 与宿主同一套逻辑。 */
+    extern const char *dm_host_data_dir(void);
+    const char *romfs = dm_host_data_dir();
     return dm_host_boot(romfs, save);   /* 0 = 成功 */
 }

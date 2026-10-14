@@ -35,8 +35,14 @@ def sha256_file(p):
 
 # ---------------------------------------------------------------- 清单
 
-def build_manifest(patcher_out, shader_dir, ios_dir):
-    """列出应该进包的所有文件，并核对每个都在。"""
+def build_manifest(patcher_out, shader_dir, ios_dir, data_dir=None, data_mode='min'):
+    """列出应该进包的所有文件，并核对每个都在。
+
+    data_dir: 游戏资源所在目录（work/extract/game 那一层）。None = 不打进包。
+    data_mode: 'min' = 只打启动集（约 40 MB，够跑到「读表、找资源」那一步）
+               'full' = 全部（约 4 GB，ipa 会很大，一般不用）
+    为什么默认只打最小集：完整资源 4 GB，ipa 太大、装机容易失败；
+    而「能不能启动」只需要表与脚本那 40 MB。剩下的大文件等验证通过再想办法。"""
     items = []   # (包内相对路径, 源路径, 说明)
     def add(inner, src, note):
         items.append((inner, src, note))
@@ -60,7 +66,25 @@ def build_manifest(patcher_out, shader_dir, ios_dir):
             if f.endswith('.metal'):
                 add('dm/metal/' + f, os.path.join(metal, f), 'Metal 着色器源码')
 
-    # ③ iOS 外壳源码（Mac 上编译用；不进包，但列出来提醒还缺它）
+    # ③ 游戏资源（可选）
+    #    放包根的 data/ —— 与 hle_host_dir.c 的 dm_host_data_dir() 一致：
+    #      它先看 <bundle>/data 有没有，有就用它（用户不用手工拷文件）
+    if data_dir and os.path.isdir(data_dir):
+        MIN_PREFIX = ('data/database/', 'data/script/',
+                      'data/shader_1_00.dat', 'data/msg_1_00.dat')
+        n_data = 0
+        for root, _dirs, files in os.walk(data_dir):
+            for f in files:
+                src = os.path.join(root, f)
+                rel = os.path.relpath(src, data_dir).replace(os.sep, '/')
+                if data_mode == 'min' and not rel.startswith(MIN_PREFIX):
+                    continue
+                add(rel, src, '游戏资源（内置）')
+                n_data += 1
+        if n_data == 0:
+            print('[dmpack] 警告: 在 %s 下没找到要打的资源' % data_dir)
+
+    # ④ iOS 外壳源码（Mac 上编译用；不进包，但列出来提醒）
     for f in ('main.m', 'front_ios.m', 'Info.plist'):
         p = os.path.join(ios_dir, f)
         if os.path.exists(p):
@@ -158,13 +182,23 @@ def main():
     ap.add_argument('--shell', default=None, help='壳 ipa（**需要先在 Mac 上构建**）')
     ap.add_argument('--out', default=None, help='输出 ipa 路径')
     ap.add_argument('--manifest', action='store_true', help='只列清单，不做别的')
+    ap.add_argument('--with-data', dest='data_dir',
+                    default=os.path.join(DM_ROOT, 'extract', 'game'),
+                    help='游戏资源目录（默认 work/extract/game）；传空串则不打包内资源')
+    ap.add_argument('--data-mode', choices=('min', 'full'), default='min',
+                    help='min（默认）= 只打启动集约 40 MB；full = 全部约 4 GB')
     a = ap.parse_args()
 
     say('产物目录: %s' % a.patcher_out)
     say('着色器目录: %s' % a.shader_dir)
     say('iOS 源码: %s' % a.ios_dir)
+    if a.data_dir:
+        say('游戏资源: %s（模式 %s）' % (a.data_dir, a.data_mode))
+    else:
+        say('游戏资源: 不打进包（用户需手工拷进 Documents）')
 
-    items = build_manifest(a.patcher_out, a.shader_dir, a.ios_dir)
+    items = build_manifest(a.patcher_out, a.shader_dir, a.ios_dir,
+                           a.data_dir or None, a.data_mode)
     missing = print_manifest(items)
     if missing:
         print('=== 缺文件（%d 个）===' % len(missing))
