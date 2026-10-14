@@ -60,11 +60,17 @@ static dm_host     g_host;      /* 门表：dm_host 持有 ents/n（单个有序
 static int         g_booted = 0;
 static char        g_romfs[1024], g_save[1200];
 
-/* 线程键：真机侧由 hle_nn_thread 建；Windows 上给一组假键号即可（键页只存键号×8）。
-   这里用一个弱符号包装，避免 Windows 自测时链接缺 dm_thread_key。 */
+/* 线程键：真机侧由 hle_plat_aarch64.c 的 dm_thread_key() 真建 pthread 键；
+   Windows 上给一组假键号即可（键页只存「键号×8」），避免自测时链接缺符号。 */
 #if defined(_WIN32)
 static unsigned thread_key_stub(int which) { return 10u + (unsigned)which; }
 #define dm_thread_key thread_key_stub
+#else
+/* 原来这里漏了声明：非 Windows 分支上 clang 直接报
+ *   error: call to undeclared function 'dm_thread_key';
+ *          ISO C99 and later do not support implicit function declarations
+ * 实现见 hle_plat_aarch64.c: `unsigned dm_thread_key(int which)`。 */
+extern unsigned dm_thread_key(int which);
 #endif
 
 /* 客体入口点（dm_host_boot 里按名字找 nnMain 得到）。

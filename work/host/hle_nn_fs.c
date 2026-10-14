@@ -12,6 +12,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+  /* ftruncate() 声明在 <unistd.h> 里（Darwin / Linux 都是）。原来漏了这行，
+   * 非 Windows 分支上 clang 报
+   *   error: call to undeclared function 'ftruncate';
+   *          ISO C99 and later do not support implicit function declarations */
+  #include <unistd.h>
+#endif
 
 /* ---------------- 虚拟文件系统 ---------------- */
 

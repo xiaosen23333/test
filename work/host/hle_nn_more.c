@@ -11,6 +11,11 @@
  */
 #include "hle.h"
 #include "hle_nn.h"
+/* 必须包含自己的头：dm_nn_InitializeSystemEvent() 等在 hle_nn_more.h 里声明
+ * （实现在 hle_nn_thread.c）。原来漏了这行，clang 报
+ *   error: call to undeclared function 'dm_nn_InitializeSystemEvent'
+ * 顺带好处：这样本文件的定义会与头文件声明逐一对照，签名写错当场就能发现。 */
+#include "hle_nn_more.h"
 
 #include <stdio.h>
 #include <string.h>
