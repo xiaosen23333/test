@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  本游戏 iOS 外壳的 Info.plist。
+  关键项（每一条都对应一个具体的实现需要，不是照抄模板）：
+
+  · UISupportedInterfaceOrientations       横屏 —— 引擎的 ViewProjectionMtx 与 drawWH 都是横向
+  · CADisableMinimumFrameDurationOnPhone    高刷 —— iPhone 上 App 自己调 nextDrawable 时
+                                            系统默认按 60 Hz 给画布；D2R 实测只加这一项仍为 60，
+                                            还要挂一个空回调的 CADisplayLink「申请」（见 front_ios.m）
+  · UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace
+                                            游戏资源（约 5 GB）不进安装包，要用户用
+                                            Finder / 「文件」App 拷进本 App 的文件夹
+  · UIRequiredDeviceCapabilities metal      需要 Metal
+  · UIStatusBarHidden / UIViewControllerBasedStatusBarAppearance
+                                            全屏游戏，不要状态栏
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>DmGame</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.dm.game</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>静谧田园</string>
+    <key>CFBundleDisplayName</key>
+    <string>静谧田园</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>MinimumOSVersion</key>
+    <string>15.0</string>
+
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
+
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+        <string>metal</string>
+    </array>
+
+    <key>UIStatusBarHidden</key>
+    <true/>
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
+    <key>UIRequiresFullScreen</key>
+    <true/>
+    <key>UIApplicationSupportsIndirectInputEvents</key>
+    <true/>
+</dict>
+</plist>

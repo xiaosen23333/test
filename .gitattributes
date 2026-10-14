@@ -1,0 +1,14 @@
+# 强制所有文本文件用 LF 换行。
+# 否则 Windows 上 push 出去的源码可能带 CRLF，在 macOS 上编译时
+# 可能让 .S 汇编的某些处理出问题，也会让 git diff 全是噪音。
+* text=auto eol=lf
+
+# 二进制文件明确标注，避免被当成文本处理
+*.bin binary
+*.nro binary
+*.nso binary
+*.ipa binary
+*.png binary
+*.jpg binary
+*.framework binary
+*.zip binary

@@ -1,0 +1,142 @@
+/* 宿主入口 —— 进客体（aarch64 专用）。
+ *
+ * ============================================================================
+ * 这是「Windows 侧能写、但只有 aarch64 上能跑」的那一步。
+ * 本文件的所有函数在 Windows 上**不编译**（由 hle_nvn_boot.c 里的
+ * `#if defined(__aarch64__) || defined(_M_ARM64)` 隔开）。
+ * ============================================================================
+ *
+ * 进客体要做的四件事（顺序不能错）：
+ *   ① 建客体主线程的**栈**（Horizon 主线程栈大小通常 1 MB，取值见下）
+ *   ② 给主线程**填键页与线程槽**（改写后的客体读 tpidrro_el0 + 8*键号 取槽；
+ *      四个槽 K18/KTLS/KTLR/KGATE 必须都填，否则客体一读 x18 就崩）
+ *   ③ 按启动计划依次调：_init_libc1 → （跑 __init_array）→ nnosInitialize
+ *      → nninitStartup → nnMain
+ *   ④ **不能在宿主线程上直接跳** —— 客体以为自己在它自己的栈上，
+ *      且 x30 要求是「返回即错误」的哨兵。所以切栈到 ①，用 dm_guest_enter。
+ *
+ * 关于启动顺序的诚实说明：
+ *   启动计划里五个符号的**地址**都是实测确定的（见 hle_nvn_boot.c 的注释），
+ *   但它们的**调用顺序与参数**在 Windows 上无法验证 ——
+ *   我核对过：main 里**没有** bl 到 nninitStartup/nnMain 的调用点（0 处），
+ *   说明 SDK 是通过**函数指针**调它们的（很可能是 nn::init::Start 里）。
+ *   所以下面的顺序是「照 D2R 的 main.c 描述 + 符号语义」排的，
+ *   **真机上可能需要按实测调整**。调整点已用 TODO 标出。
+ */
+#include "hle.h"
+#include "loader.h"
+#include "hle_nn.h"
+/* 注意：没有 hle_nvn_boot.h —— 启动逻辑在 hle_nvn_boot.c 里，
+   它的接口只有三个函数，直接在这里声明（我第一版 #include 了一个不存在的头，
+   编译报 C1083）。理想做法是把它们提到一个头文件共用。 */
+extern void  *dm_host_get_guest_entry(void);
+extern const void *dm_host_boot_plan(void);
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+
+/* 声明 _dm_guest_enter（汇编，见 dm_guest_entry.S）：
+   x0 = 入口地址, x1 = 参数, x2 = 客体栈顶 */
+extern void dm_guest_enter(void *entry, void *arg, void *stack_top);
+
+/* 客体入口返回了（不该发生 —— Horizon 线程必须走 ExitThread）。
+   与 D2R 的 _dm_thread_returned 同语义：报告后终止该线程。 */
+extern void dm_thread_returned(void);
+
+/* 客体主线程栈。Horizon 的主线程栈按 1 MB 准备（SDK 默认值；真机上若
+   客体自己再建线程，那些线程的栈由 nn::os::CreateThread 的参数给出）。 */
+#define DM_GUEST_STACK_SIZE (1u << 20)
+static unsigned char g_guest_stack[DM_GUEST_STACK_SIZE] __attribute__((aligned(16)));
+
+/* 启动计划的结构（与 hle_nvn_boot.c 里的 dm_guest_boot_plan 一致）。
+   注意：这里**必须**与那边的字段顺序完全相同 —— 两处独立定义是隐患，
+   理想做法是提到头文件共用（我在第 29 轮的错里记过这条）。 */
+typedef struct {
+    void *init_libc1;      /* sdk + 0x56c210 */
+    void *init_array;      /* ELF _init */
+    void *os_initialize;   /* sdk + 0x1493e0 */
+    void *init_startup;    /* main + 0x9ac350 */
+    void *nn_main;         /* main + 0x9aec30 */
+    int   n_found;
+} dm_guest_boot_plan_t;
+
+/* 主体：真正的“进客体”逻辑。放在单独函数里，是为了让 dm_host_enter_guest
+   只承担「调一次」的职责，便于以后加诊断。 */
+static void guest_main(void) {
+    const dm_guest_boot_plan_t *P = (const dm_guest_boot_plan_t *)dm_host_boot_plan();
+    if (!P) { fprintf(stderr, "[dm] 没有启动计划\n"); return; }
+
+    /* 注意：**键页与线程槽不用在这里填** ——
+       dm_loader_map（hle_nvn_boot.c 的装载循环里）已经把「键号×8」写进键页了
+       （loader.c:154-158）。我第一版在这里又写了一个 dm_load_install_key_page 调用，
+       而那个函数根本不存在 —— 链接会失败。写入口代码时容易重复做已经做过的事，
+       所以这里明确写一行「不做什么」。 */
+
+    /* 依启动计划调用。
+     *
+     * !! 顺序说明（真机上可能要调）!!
+     *   D2R 的 main.c 第 60 行：「逐条照抄 Start：_init_libc1 = __nnmusl_init_locks
+     *   （把 stdio 等锁初始化成递归锁，略过会在 putc 嵌套加锁时自锁死）」——
+     *   所以 _init_libc1 **必须最先**，且在客体有机会 printf 之前。
+     *   之后是 SDK 运行时 nnosInitialize，再 nninitStartup，最后 nnMain。
+     *
+     * 【第 39 轮的反汇编核对结果 —— 把原先的两个 TODO 收窄了】
+     *   · 五个符号的地址**全部落在各自模块的 text 段**（核过）：
+     *       _init_libc1    -> sdk  + 0x56c210  (text)
+     *       nnosInitialize -> sdk  + 0x1493e0  (text)
+     *       nninitStartup  -> main + 0x9ac350  (text)
+     *       nnMain         -> main + 0x9aec30  (text, 72 条指令, **不用 x0 → 无参**)
+     *     所以「跳到垃圾地址」这个致命风险已排除。
+     *   · `nninitStartup` 的**参数不重要**：它开头把 x0 存到全局 0xba56a8，
+     *     而那个全局在 main/sdk 里**只被写、从不被读**（各扫了一遍：引用数 1 / 0）。
+     *     所以传什么都不会被用到 —— 原先我担心的「回调参数」不存在。
+     *     （教训：我第 37 轮从一行 `str x0, [x8,#0x6a8]` 就推断「那是回调」，
+     *       是过度解读；**「谁读它」才是判据**。）
+     *
+     * TODO(真机): 剩下唯一不确定的是**这五步之间的先后**。
+     *   若卡在某一步不再前进，把这五步各自的耗时打出来就能定位。
+     */
+    typedef void (*fn0)(void);
+
+    if (P->init_libc1) {
+        /* 先跑 C++ 静态构造（__init_array），再初始化 libc 锁 ——
+           这两个的先后在真机上可能要调（见上） */
+        if (P->init_array) ((fn0)P->init_array)();
+        ((fn0)P->init_libc1)();
+    }
+    if (P->os_initialize) ((fn0)P->os_initialize)();
+    if (P->init_startup)  ((fn0)P->init_startup)();
+    if (P->nn_main)       ((fn0)P->nn_main)();
+
+    /* 客体从 nnMain 返回 = 游戏退出。真机侧这里应当正常退出 App。 */
+    fprintf(stderr, "[dm] nnMain 返回了（游戏应当是自己退出的）\n");
+}
+
+/* 由 hle_nvn_boot.c 的 dm_host_frame 调用（aarch64 分支） */
+void dm_host_enter_guest(void) {
+    static int entered = 0;
+    if (entered) return;      /* 客体自己会一直跑，不该被重复进入 */
+    entered = 1;
+
+    void *entry = dm_host_get_guest_entry();
+    if (!entry) {
+        fprintf(stderr, "[dm] 还没有客体入口点（nnMain 未解析）\n");
+        return;
+    }
+
+    /* 客体栈顶：栈向下生长，所以给的是**高地址端**，并保持 16 字节对齐
+       （AAPCS64 要求 SP 在函数入口 16 字节对齐） */
+    void *stack_top = (void *)(g_guest_stack + DM_GUEST_STACK_SIZE);
+
+    dm_guest_enter((void *)guest_main, NULL, stack_top);
+}
+
+#else  /* 非 aarch64：本文件不产出任何代码 */
+
+/* 空实现，避免链接期找不到符号（Windows 自测里 hle_nvn_boot.c 不会调它） */
+void dm_host_enter_guest(void) { }
+
+#endif

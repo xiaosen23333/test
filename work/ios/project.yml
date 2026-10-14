@@ -1,0 +1,126 @@
+# iOS 外壳的 XcodeGen 工程定义。
+#
+# 用法（在 Mac 上）：
+#     brew install xcodegen
+#     cd <仓库根>/work/ios
+#     xcodegen generate
+#     open DmGame.xcodeproj        # 然后选真机、选自己的 Apple ID team、Run
+#
+# 为什么用 XcodeGen 而不是提交一个 .xcodeproj：
+#   .xcodeproj 是二进制式的（pbxproj），冲突难合、也难读；
+#   project.yml 是可读的文本，一眼能看出「有哪些源文件、链了哪些库」。
+#   D2R 也是这个做法（dm/ios/project.yml）。
+#
+# 目标产物：DmGame.app（可执行文件 + Info.plist + dm/ 资源目录）
+# 之后由 work/tools/dmpack.py 把「不含游戏内容的壳」打包成 ipa。
+
+name: DmGame
+options:
+  bundleIdPrefix: local.dm
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  DmGame:
+    type: application
+    platform: iOS
+    sources:
+      # ---- iOS 外壳（本目录）----
+      - path: main.m
+      - path: front_ios.m
+      # ---- 宿主源码（../host）----
+      # 逐一列出而不是整目录引用：**这份清单必须与 work/tools/build_all.ps1 的
+      # SRC 列表一致** —— 两边不一致会导致「Windows 上能编、Mac 上缺文件」
+      # 这类最难查的问题。
+      - path: ../host/hle.c
+      - path: ../host/loader.c
+      - path: ../host/hle_nn.c
+      - path: ../host/hle_nn_fs.c
+      - path: ../host/hle_nn_fs2.c
+      - path: ../host/hle_nn_thread.c
+      - path: ../host/hle_nn_util.c
+      - path: ../host/hle_nn_more.c
+      - path: ../host/hle_nn_audio.c
+      - path: ../host/nn_impl_table.c
+      - path: ../host/nvn_names.c
+      - path: ../host/hle_nvn.c
+      - path: ../host/hle_nvn_obj.c
+      - path: ../host/hle_nvn_cmd.c
+      - path: ../host/hle_nvn_replay.c
+      - path: ../host/hle_nvn_metal.c
+      - path: ../host/hle_nvn_fmt.c
+      - path: ../host/hle_nvn_glslc.c
+      - path: ../host/hle_nvn_mtl.c
+      - path: ../host/hle_nvn_boot.c
+      - path: ../host/hle_nvn_guest.c
+      - path: ../host/hle_plat_aarch64.c
+      # ---- 门入口 / 客体线程切栈 的汇编 ----
+      # buildPhase 显式写成 sources：.S 的归类不要交给 XcodeGen 猜，
+      # 万一被丢进 Resources 就会「链接时找不到 _dm_gate」。
+      - path: ../host/entry.S
+        buildPhase: sources
+      # ---- 汇编：切栈进客体 ----
+      - path: ../host/dm_guest_entry.S
+        buildPhase: sources
+      # ---- Metal API 编码层（Apple 专用）----
+      - path: ../host/hle_nvn_mtl_apply.m
+        buildPhase: sources
+    settings:
+      base:
+        # Info.plist 由我们自己提供（含横屏、高刷、文件共享等项；见 Info.plist 注释）
+        INFOPLIST_FILE: Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: local.dm.game
+        PRODUCT_NAME: DmGame
+        # aarch64 必需（Switch 的代码是 aarch64，要原生执行）
+        ARCHS: arm64
+        ONLY_ACTIVE_ARCH: NO
+        # C 语言：C11（宿主用了匿名 struct/union、_Static_assert 等）
+        GCC_C_LANGUAGE_STANDARD: c11
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        # 关闭 ARC 的假设：front_ios.m 里有手动的 @autoreleasepool，
+        # 且宿主是 C 代码 —— 保持与 D2R 相同的做法
+        CLANG_ENABLE_OBJC_ARC: YES
+        # 优化：Debug 用 -O1（宿主代码量大，-O0 太慢）；Release 用 -O2
+        # （D2R 在真机上用过 -O2；若发现编译器把跳板/键页逻辑优化坏，
+        #   可对 hle_nvn_boot.c / hle_nvn_guest.c 单独降到 -O1）
+        # 注意：base 里只能是「单个值」，多值用数组会让 pbxproj 里出现
+        #   GCC_OPTIMIZATION_LEVEL = ("-O1","-O2")，Xcode 会抱怨；真正的
+        #   分配置取值放在下面的 configs 里。
+        GCC_OPTIMIZATION_LEVEL: "-O1"
+        # 允许未声明的选择器（front_ios.m 里用了 UIAlertController 等）
+        CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF: NO
+        # 关闭「把警告当错误」—— 先让它编出来，再看警告
+        GCC_TREAT_WARNINGS_AS_ERRORS: NO
+        CLANG_WARN_DOCUMENTATION_COMMENTS: NO
+      configs:
+        Debug:
+          GCC_OPTIMIZATION_LEVEL: "-O1"
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+        Release:
+          GCC_OPTIMIZATION_LEVEL: "-O2"
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
+    # 资源：dm/ 目录（改写后的 5 个模块 + 着色器映射表 + metal/ + fixups/gates）
+    # 由打包时放入；开发期可先用「文件共享」把模块拷进 Documents 测。
+    # buildPhase 用 resources 让它进 bundle。
+    preBuildScripts: []
+    postCompileScripts: []
+    postBuildScripts:
+      - name: 检查 dm/ 资源是否在
+        script: |
+          if [ ! -d "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/dm" ]; then
+            echo "note: 包里还没有 dm/ 资源目录 —— 出壳时会缺内容；开发期可先把模块拷进 App 的 Documents"
+          fi
+        basedOnDependencyAnalysis: false
+
+schemes:
+  DmGame:
+    build:
+      targets:
+        DmGame: all
+    run:
+      config: Debug

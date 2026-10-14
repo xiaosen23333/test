@@ -1,0 +1,19 @@
+# Xcode / 构建产物
+work/ios/DmGame.xcodeproj/
+work/ios/build/
+work/ios/build.log
+work/ios/ipa/
+work/host/build/
+
+# 本地环境
+.vs/
+*.user
+*.suo
+.venv/
+__pycache__/
+*.pyc
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store

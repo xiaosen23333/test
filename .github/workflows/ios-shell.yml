@@ -1,0 +1,136 @@
+# 在 GitHub 借一台 Mac 编译 iOS 外壳（不需要自己有 Mac）
+#
+# 产出：DmGame-shell.ipa（未签名，约 3~6 MB）—— 就是「壳」。
+# 之后的步骤（塞游戏内容、自签装机）全在 Windows 上做。
+#
+# 触发方式：
+#   · 每次 push 到 main / master 自动跑
+#   · 或者到仓库 Actions 页签点 "Run workflow" 手动跑
+
+name: Build iOS shell
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios-shell:
+    # macos-15 自带 Xcode 16.x；若想换别的镜像改这一行即可（macos-14 = Xcode 15.x）
+    runs-on: macos-15
+
+    defaults:
+      run:
+        working-directory: work/ios
+
+    steps:
+      - name: 取出源码
+        uses: actions/checkout@v4
+
+      - name: 打印环境信息（出错时靠这个定位）
+        run: |
+          echo "=== macOS ==="        && sw_vers
+          echo "=== arch ==="         && uname -m
+          echo "=== Xcode 路径 ==="   && xcode-select -p
+          echo "=== xcodebuild ==="   && xcodebuild -version
+          echo "=== SDK ==="          && xcodebuild -showsdks | grep -i iphoneos || true
+          echo "=== 目录树 ==="       && ls -la .. && ls -la .
+          echo "=== host 源文件数 ===" && ls -1 ../host/*.c  ../host/*.S ../host/*.m | wc -l
+
+      - name: 装 XcodeGen（把 project.yml 变成 .xcodeproj）
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: 生成 Xcode 工程
+        run: |
+          xcodegen generate
+          echo "--- 生成结果 ---"
+          ls -la
+          echo "--- 工程里的 source 阶段文件数 ---"
+          grep -c 'isa = PBXBuildFile' DmGame.xcodeproj/project.pbxproj || true
+
+      - name: 编译（Release / 未签名）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project DmGame.xcodeproj \
+            -scheme DmGame \
+            -sdk iphoneos \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ./build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build 2>&1 | tee build.log
+
+      # 专门对付「project.yml 清单漏了源文件」这类最难查的问题：
+      # 逐个确认每个源文件真的被编译/汇编过，而不是被 Xcode 静默忽略。
+      - name: 核对每个源文件是否真的参与了编译
+        if: always()
+        run: |
+          echo "=== 参与编译的文件（CompileC / CompileAssetCatalog / 汇编）==="
+          grep -oE '(CompileC|CompileMetalFile|CompileXIB|Ld )[^ ]*' build.log | sed 's/.*[ /]//' | sort -u | head -60 || true
+          echo
+          missing=0
+          for f in ../host/*.c ../host/*.m ../host/*.S main.m front_ios.m; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f")
+            if ! grep -q "$base" build.log; then
+              echo "!! 没出现在编译日志里: $f"
+              missing=$((missing+1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "==> 有 $missing 个源文件没被编译 —— 多半是 project.yml 的 sources 清单漏了它"
+          else
+            echo "==> 所有源文件都参与了编译"
+          fi
+
+      - name: 产物检查
+        run: |
+          APP=./build/Build/Products/Release-iphoneos/DmGame.app
+          if [ ! -d "$APP" ]; then echo "没有生成 .app —— 编译失败了"; exit 1; fi
+          echo "=== .app 内容 ==="
+          ls -la "$APP"
+          echo "=== 可执行文件架构 ==="
+          lipo -info "$APP/DmGame" || file "$APP/DmGame"
+
+      - name: 打壳（装成 ipa）
+        run: |
+          APP=./build/Build/Products/Release-iphoneos/DmGame.app
+          rm -rf ipa && mkdir -p ipa/Payload
+          cp -R "$APP" ipa/Payload/
+          cd ipa
+          # -y 保留符号链接，-q 安静，-r 递归
+          zip -qry DmGame-shell.ipa Payload
+          ls -lh DmGame-shell.ipa
+          echo "=== ipa 内部 ==="
+          unzip -l DmGame-shell.ipa | head -20
+          # 顺带把大小算进 step summary，方便直接看
+          echo "### 壳大小：$(du -h DmGame-shell.ipa | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: DmGame-shell-ipa
+          path: work/ios/ipa/DmGame-shell.ipa
+          retention-days: 30
+
+      - name: 上传编译日志（失败时最有用）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: work/ios/build.log
+          retention-days: 30
