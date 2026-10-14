@@ -84,10 +84,14 @@ targets:
         # 优化：Debug 用 -O1（宿主代码量大，-O0 太慢）；Release 用 -O2
         # （D2R 在真机上用过 -O2；若发现编译器把跳板/键页逻辑优化坏，
         #   可对 hle_nvn_boot.c / hle_nvn_guest.c 单独降到 -O1）
-        # 注意：base 里只能是「单个值」，多值用数组会让 pbxproj 里出现
-        #   GCC_OPTIMIZATION_LEVEL = ("-O1","-O2")，Xcode 会抱怨；真正的
-        #   分配置取值放在下面的 configs 里。
-        GCC_OPTIMIZATION_LEVEL: "-O1"
+        #
+        # !! 这里只写「档位」，不要自己写 -O 前缀 !!
+        # Xcode 的 GCC_OPTIMIZATION_LEVEL 是**紧跟在 -O 后面的那一部分**：
+        #   写 1   -> clang 收到 -O1     OK
+        #   写 -O1 -> clang 收到 -O-O1   报错 error: invalid integral value '-O1' in '-O-O1'
+        # 合法取值：0 / 1 / 2 / 3 / s / fast
+        # 真正的分档取值在下面 configs 里（base 只是兜底）。
+        GCC_OPTIMIZATION_LEVEL: "1"
         # 允许未声明的选择器（front_ios.m 里用了 UIAlertController 等）
         CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF: NO
         # 关闭「把警告当错误」—— 先让它编出来，再看警告
@@ -95,10 +99,10 @@ targets:
         CLANG_WARN_DOCUMENTATION_COMMENTS: NO
       configs:
         Debug:
-          GCC_OPTIMIZATION_LEVEL: "-O1"
+          GCC_OPTIMIZATION_LEVEL: "1"
           SWIFT_OPTIMIZATION_LEVEL: "-Onone"
         Release:
-          GCC_OPTIMIZATION_LEVEL: "-O2"
+          GCC_OPTIMIZATION_LEVEL: "2"
     dependencies:
       - sdk: Metal.framework
       - sdk: QuartzCore.framework

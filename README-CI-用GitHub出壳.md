@@ -8,7 +8,7 @@
 
 ---
 
-## 一、一次性准备（约 5 分钟）
+## 一、一次性准备
 
 ### 1. 在 GitHub 上建一个空仓库
 
@@ -27,9 +27,6 @@
 在本仓库根目录（就是能看到 `work/` 和 `.github/` 的那一层）执行：
 
 ```bash
-git init -b main
-git add .
-git commit -m "iOS shell build kit"
 git remote add origin https://github.com/<你的用户名>/dm-ios-shell.git
 git push -u origin main
 ```
@@ -37,6 +34,19 @@ git push -u origin main
 `<你的用户名>` 换成你自己的。第一次 push 会弹窗让你登录 GitHub。
 
 **推完就自动开始编译了** —— 打开仓库页面的 **Actions** 页签就能看到。
+
+### 3. 改动之后怎么重编
+
+改完代码：
+
+```bash
+git add -A
+git commit -m "描述"
+git push
+```
+
+不想改代码、只想重跑一次：**Actions** → 左边选 **Build iOS shell**
+→ 右上 **Run workflow** → 选 `main` → 绿色按钮。
 
 ---
 
@@ -52,8 +62,8 @@ git push -u origin main
 
 点进那次运行 → 展开红色的那一步，就能看到报错。
 
-想重新编译一次：**Actions** → 左边选 **Build iOS shell** → 右上 **Run workflow**
-→ 选 `main` → 绿色按钮。改了代码 push 上去也会自动重编。
+**先看日志最末尾的「全量语法体检」** —— 那一步会把整个工程的语法错误
+一次性列出来，比翻上面 `xcodebuild` 的输出快得多。
 
 ---
 
@@ -77,30 +87,75 @@ git push -u origin main
 |---|---|
 | 打印 macOS / Xcode / SDK 版本、目录树、源文件数量 | 出问题时不用猜环境 |
 | 生成工程后打印 pbxproj 里的文件数 | 立刻能看出源文件清单有没有生效 |
+| **校验优化档位没写坏** | `GCC_OPTIMIZATION_LEVEL` 写成 `-O2` 会被拼成 `-O-O2`，这一关直接拦住，不用等整轮编译 |
 | 编译后再逐个核对每个 `*.c/*.m/*.S` 是否真的进了编译日志 | 「清单漏了某个文件」是这类构建最难查的错，这一步会直接点名 |
+| **全量语法体检** | `xcodebuild` 一报错就停，这一步用 `clang -fsyntax-only` 把所有文件扫一遍，一次性看全所有错误 |
 | `lipo -info` 确认产物是 arm64 | 编成 x86_64 的话真机装不上 |
 | 打完 ipa 后 `unzip -l` 列出内部结构 | 确认是规范的 `Payload/DmGame.app` |
 | 无论成功失败都上传 `build.log` | 失败时日志一定拿得到 |
 
-## 五、相对原说明改动的两处
+---
 
-为了让 CI 一次跑过，`work/ios/project.yml` 里改了两个地方（都不改变语义）：
+## 五、相对原说明改动的地方
 
-1. **`GCC_OPTIMIZATION_LEVEL`** 原来是数组 `["-O1", "-O2"]`，改成单值 `"-O1"`。
-   数组会在 `pbxproj` 里生成 `GCC_OPTIMIZATION_LEVEL = ("-O1","-O2")`，
-   Xcode 会抱怨。真正的取值本来就由下面 `configs:` 里的 Debug/Release 覆盖，
-   所以行为完全一样。
-2. **`entry.S` / `dm_guest_entry.S` / `hle_nvn_mtl_apply.m`** 显式加了
-   `buildPhase: sources`。否则 `.S` 的归类要靠 XcodeGen 猜，
-   万一被丢进 Resources，链接期就会报 `_dm_gate` 未定义。
+### 1. `GCC_OPTIMIZATION_LEVEL` 写法 —— 第一次编译失败的原因就是它
+
+`work/ios/project.yml` 原来写的是：
+
+```yaml
+GCC_OPTIMIZATION_LEVEL: "-O2"
+```
+
+**这是错的。** Xcode 的 `GCC_OPTIMIZATION_LEVEL` 只是**紧跟在 `-O` 后面的那一部分**，
+`-O` 前缀由 Xcode 自己补，于是 clang 实际收到的是 **`-O-O2`**，直接报：
+
+```
+error: invalid integral value '-O2' in '-O-O2'
+```
+
+已改成只写档位：
+
+```yaml
+GCC_OPTIMIZATION_LEVEL: "1"   # Debug，clang 收到 -O1
+GCC_OPTIMIZATION_LEVEL: "2"   # Release，clang 收到 -O2
+```
+
+合法取值只有 `0 / 1 / 2 / 3 / s / fast`。
+（原文件 base 处写的是数组 `["-O1","-O2"]`，同样不合规，一并改掉了。）
+
+这不是环境问题 —— 是 `project.yml` 在 Windows 上从没被 Xcode 读过，
+所以一直没暴露。
+
+### 2. 汇编文件的归类
+
+`entry.S` / `dm_guest_entry.S` / `hle_nvn_mtl_apply.m` 显式加了
+`buildPhase: sources`。否则 `.S` 的归类要靠 XcodeGen 猜，
+万一被丢进 Resources，链接期就会报 `_dm_gate` 未定义。
+
+### 3. 换行符
+
+加了 `.gitattributes`（`* text=auto eol=lf`），避免 Windows 上的
+`core.autocrlf` 把源码换成 CRLF 再推给 macOS。二进制文件也单独标注了。
+
+---
 
 ## 六、出问题时最可能的原因
 
 | 现象 | 原因 |
 |---|---|
+| `invalid integral value '-O2' in '-O-O2'` | 优化档位带了 `-O` 前缀，只写数字（已修） |
 | `Unable to find a destination` | 已用 `-destination 'generic/platform=iOS'` 规避 |
 | 某个 `../host/*.c` 找不到 | `project.yml` 的 `sources` 清单与实际目录不符 —— CI 的核对步骤会点名是哪个 |
 | 一堆 `Use of undeclared identifier` | 同上，多半是漏了某个 `*.c` |
 | 汇编报错 | `ARCHS` 已是 `arm64` |
 | 链接报 `_dm_thread_returned` / `_gate_dispatch` / `_unimpl_c` 未定义 | 是宿主侧缺实现，不是环境问题 |
 | `MTLPixelFormat` 之类未定义 | 与 Apple 头文件无关，`hle_nvn_fmt.c` 只返回整数 |
+
+---
+
+## 七、提醒
+
+CI 只能证明**「这些代码能被 clang 编过」**。
+`hle_nvn_mtl_apply.m` 里那 3 个 `TODO`、`hle_nvn_guest.c` 里启动序列的顺序
+都还是要在真机上验的。但把「能不能编过」这一关先过掉，
+就排除了最大的一类不确定性。

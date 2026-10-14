@@ -58,6 +58,25 @@ jobs:
           echo "--- 工程里的 source 阶段文件数 ---"
           grep -c 'isa = PBXBuildFile' DmGame.xcodeproj/project.pbxproj || true
 
+      # 护栏：GCC_OPTIMIZATION_LEVEL 只写档位（1/2/s），写 "-O2" 会被拼成
+      # -O-O2，clang 报 "invalid integral value '-O2' in '-O-O2'"。
+      # 提前拦一下，省掉一轮 5 分钟的推送等待。
+      - name: 校验优化档位没写坏
+        run: |
+          fail=0
+          for cfg in Debug Release; do
+            lvl=$(xcodebuild -project DmGame.xcodeproj -scheme DmGame -sdk iphoneos \
+                    -configuration "$cfg" -showBuildSettings 2>/dev/null \
+                  | awk -F' = ' '/ GCC_OPTIMIZATION_LEVEL /{print $2; exit}')
+            lvl=$(echo "$lvl" | tr -d ' ')
+            echo "$cfg -> GCC_OPTIMIZATION_LEVEL=[$lvl]"
+            case "$lvl" in
+              0|1|2|3|s|fast) echo "   OK（clang 会收到 -O$lvl）" ;;
+              *) echo "   !! 会被拼成 -O$lvl —— clang 会拒绝，请改成不带 -O 前缀的档位"; fail=1 ;;
+            esac
+          done
+          exit $fail
+
       - name: 编译（Release / 未签名）
         run: |
           set -o pipefail
@@ -96,6 +115,45 @@ jobs:
           else
             echo "==> 所有源文件都参与了编译"
           fi
+
+      # xcodebuild 一旦报错就停下，一次只能看到一部分错误。这一步用 clang
+      # 把所有源文件「只做语法检查」跑一遍（不产出目标文件），把整个工程的
+      # 错误一次性列出来 —— 避免为了看清错误来回推送好几次。
+      # 它不影响构建结论（continue-on-error），只是给你一份完整清单。
+      - name: 全量语法体检（编译失败时也跑，一次性列出所有错误）
+        if: always()
+        continue-on-error: true
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK = $SDK"
+          total=0
+          for f in ../host/*.c ../host/*.m main.m front_ios.m; do
+            [ -e "$f" ] || continue
+            case "$f" in
+              *.m) lang=objective-c ;;
+              *)   lang=c ;;
+            esac
+            out=$(clang -fsyntax-only -w -x "$lang" -std=c11 -arch arm64 \
+                    -target arm64-apple-ios15.0 -isysroot "$SDK" \
+                    -I../host -I. "$f" 2>&1 || true)
+            n=$(printf '%s\n' "$out" | grep -c 'error:' || true)
+            if [ "$n" -gt 0 ]; then
+              echo ""
+              echo "----- $f : $n 处错误 -----"
+              printf '%s\n' "$out" | grep -m 12 'error:'
+              total=$((total + n))
+            fi
+          done
+          echo ""
+          echo "======================================"
+          echo "语法体检合计：$total 处错误"
+          echo "======================================"
+          {
+            echo "### 语法体检：$total 处错误"
+            echo '```'
+            echo "（逐文件明细见本步骤日志）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 产物检查
         run: |
