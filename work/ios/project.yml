@@ -72,6 +72,13 @@ targets:
         INFOPLIST_FILE: Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: local.dm.game
         PRODUCT_NAME: DmGame
+        # 头文件搜索路径：本目录（work/ios）下的 .m 要 #include "hle.h" 等，
+        # 而那些头在 ../host 里。不加这行 clang 会报：
+        #   front_ios.m:22:10: error: 'hle.h' file not found
+        # （host/*.c 之间互相包含不需要它 —— 同目录的引号包含会就近解析。）
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/../host
+          - $(SRCROOT)
         # aarch64 必需（Switch 的代码是 aarch64，要原生执行）
         ARCHS: arm64
         ONLY_ACTIVE_ARCH: NO

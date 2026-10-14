@@ -127,12 +127,30 @@ jobs:
         run: |
           {
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          # 关键：-I 参数必须来自**工程真实的 HEADER_SEARCH_PATHS**，
+          # 不能在脚本里自己加。上一版这里硬写了 `-I../host -I.`，
+          # 而真实构建并没有这个路径 —— 结果体检把
+          #   front_ios.m:22:10: error: 'hle.h' file not found
+          # 这个真实错误掩盖掉了。现在改成从 -showBuildSettings 读。
+          SET=$(xcodebuild -project DmGame.xcodeproj -scheme DmGame -sdk iphoneos \
+                  -configuration Release -showBuildSettings 2>/dev/null)
+          SRCDIR=$(echo "$SET" | awk -F' = ' '/^ *SRCROOT /{print $2; exit}' | tr -d ' ')
+          HSP=$(echo "$SET" | awk -F' = ' '/^ *HEADER_SEARCH_PATHS /{print $2; exit}')
+          HSP=$(echo "$HSP" | sed -e "s|\$(SRCROOT)|$SRCDIR|g" \
+                                -e "s|\$(PROJECT_DIR)|$SRCDIR|g" \
+                                -e 's|\$(inherited)||g')
+          INC=""
+          for p in $HSP; do INC="$INC -I$p"; done
+
           echo ""
           echo "############################################################"
           echo "# 全量语法体检（clang -fsyntax-only，不产出目标文件）"
           echo "# 目的：xcodebuild 一遇错就停，这一步把整个工程的错误一次列全"
           echo "############################################################"
           echo "SDK = $SDK"
+          echo "SRCROOT = $SRCDIR"
+          echo "HEADER_SEARCH_PATHS = $HSP"
+          echo "实际 -I 参数:$INC"
           total=0
           for f in ../host/*.c ../host/*.m main.m front_ios.m; do
             [ -e "$f" ] || continue
@@ -142,7 +160,7 @@ jobs:
             esac
             out=$(clang -fsyntax-only -w -x "$lang" -std=c11 -arch arm64 \
                     -target arm64-apple-ios15.0 -isysroot "$SDK" \
-                    -I../host -I. "$f" 2>&1 || true)
+                    $INC "$f" 2>&1 || true)
             n=$(printf '%s\n' "$out" | grep -c 'error:' || true)
             if [ "$n" -gt 0 ]; then
               echo ""
