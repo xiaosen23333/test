@@ -63,7 +63,12 @@ void dm_thread_returned(void) {
  * 而 C 侧实现叫 dm_gate_dispatch（带 dm_host* 参数、内部用全局 host）。
  * 这里做一层适配。 */
 extern void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs);
-extern dm_host *dm_host_current(void);      /* 由 hle_nvn_boot.c 提供 */
+/* 注意：dm_host_current() 已经在本文件开头（第 20 行，#if 之外）声明过了。
+ * 这里**不要再声明一次** —— 之前这里写成 `extern dm_host *dm_host_current(void);`，
+ * 与上面的 `extern void *dm_host_current(void);` 返回类型冲突，
+ * mac 上 clang 直接报：
+ *   error: conflicting types for 'dm_host_current'
+ * 真实定义在 hle_nvn_boot.c: `void *dm_host_current(void) { return &g_host; }`。 */
 
 void dm_gate_dispatch_c(uint64_t ret, uint64_t *regs) {
     dm_gate_dispatch(dm_host_current(), ret, regs);

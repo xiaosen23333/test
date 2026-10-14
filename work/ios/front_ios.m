@@ -16,6 +16,8 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
+/* 下面用了 snprintf —— 显式包含，不要指望 UIKit 间接带进来 */
+#include <stdio.h>
 
 #include "hle.h"
 #include "hle_nn.h"

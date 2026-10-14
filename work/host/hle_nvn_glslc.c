@@ -84,6 +84,11 @@ const char *dm_glslc_last_name(void) { return g_last_name; }
   }
 #else
   #include <unistd.h>
+  /* mincore() 声明在 <sys/mman.h> 里（Darwin 与 Linux 都是），
+   * 只包含 <unistd.h> 时 clang 会报：
+   *   error: call to undeclared function 'mincore';
+   *          ISO C99 and later do not support implicit function declarations */
+  #include <sys/mman.h>
   static int mem_readable(const void *p, size_t n) {
       if (!p || !n) return 0;
       long ps = sysconf(_SC_PAGESIZE);
@@ -93,7 +98,9 @@ const char *dm_glslc_last_name(void) { return g_last_name; }
       /* 逐页检查（页对齐后 mincore 可判断是否已映射） */
       for (uintptr_t a = start & ~(uintptr_t)(ps - 1); a < end; a += (uintptr_t)ps) {
           unsigned char vec = 0;
-          if (mincore((void *)a, (size_t)ps, &vec) != 0) return 0;
+          /* 第三个参数按 (void *) 传：Darwin 的原型是 char *，
+           * glibc 的是 unsigned char * —— 传 void* 两边都不报警告。 */
+          if (mincore((void *)a, (size_t)ps, (void *)&vec) != 0) return 0;
       }
       return 1;
   }

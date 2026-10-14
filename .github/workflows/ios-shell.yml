@@ -120,11 +120,18 @@ jobs:
       # 把所有源文件「只做语法检查」跑一遍（不产出目标文件），把整个工程的
       # 错误一次性列出来 —— 避免为了看清错误来回推送好几次。
       # 它不影响构建结论（continue-on-error），只是给你一份完整清单。
+      # 输出用 tee -a 追加进 build.log，这样下载 build-log artifact 就能拿到。
       - name: 全量语法体检（编译失败时也跑，一次性列出所有错误）
         if: always()
         continue-on-error: true
         run: |
+          {
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo ""
+          echo "############################################################"
+          echo "# 全量语法体检（clang -fsyntax-only，不产出目标文件）"
+          echo "# 目的：xcodebuild 一遇错就停，这一步把整个工程的错误一次列全"
+          echo "############################################################"
           echo "SDK = $SDK"
           total=0
           for f in ../host/*.c ../host/*.m main.m front_ios.m; do
@@ -148,10 +155,12 @@ jobs:
           echo "======================================"
           echo "语法体检合计：$total 处错误"
           echo "======================================"
+          } 2>&1 | tee -a build.log
+
           {
-            echo "### 语法体检：$total 处错误"
+            echo "### 语法体检"
             echo '```'
-            echo "（逐文件明细见本步骤日志）"
+            grep -E '语法体检合计|处错误' build.log | tail -20
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
