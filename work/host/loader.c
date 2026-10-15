@@ -30,6 +30,15 @@
     #include <mach-o/dyld.h>
     #include <mach-o/getsect.h>
     #include <dlfcn.h>
+    /* !! iOS 上 mach 头文件的分工（被 CI 教训过三次，记在这里）!!
+     *   <mach/mach.h>       mach_task_self、kern_return_t、vm_address_t
+     *   <mach/vm_map.h>     vm_allocate / vm_remap / vm_deallocate、VM_FLAGS_*、VM_INHERIT_*
+     *   <mach/vm_region.h>  vm_region_basic_info_data_64_t、VM_REGION_BASIC_INFO_64
+     *   **千万不要**包含 <mach/mach_vm.h> —— iOS SDK 里那个文件第一行就是
+     *   `#error mach_vm.h unsupported.`（macOS 才有 mach_vm_region）。 */
+    #include <mach/mach.h>
+    #include <mach/vm_map.h>
+    #include <mach/vm_region.h>
   #endif
 #endif
 
@@ -392,12 +401,7 @@ int dm_loader_exec_selftest(void) {
 }
 
 #if defined(__APPLE__)
-  /* 注意：**不要**包含 <mach/mach_vm.h> —— iOS 的 SDK 里那个文件第一行就是
-     `#error mach_vm.h unsupported.`（CI #22 报的就是它）。
-     改用 vm_region_64（<mach/vm_map.h>，被 <mach/mach.h> 包含；iOS 上可用），
-     类型从 <mach/vm_region.h> 来。 */
-  #include <mach/mach.h>
-  #include <mach/vm_region.h>
+  /* mach 头文件已在文件开头统一包含（见那里的说明） */
   /* 把 VM_PROT_* 折叠成 1=R / 2=W / 4=X */
   static int darwin_vm_prot(uintptr_t addr, unsigned *prot_out) {
       vm_address_t a = (vm_address_t)addr;
