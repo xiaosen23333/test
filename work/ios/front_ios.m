@@ -13,6 +13,14 @@
  *   所以逻辑尽量简单、少用 Apple 的边角 API，降低「在 Mac 上才发现编译错」的风险。
  *   里面对宿主接口的调用都可以在 Windows 上静态核对（函数名与签名见 work/host/*.h）。
  */
+/* !! 必须放在**所有 include 之前** !!
+ * Apple 的 <ucontext.h>（崩溃处理里取 PC/LR/SP 要用）要求先定义 _XOPEN_SOURCE，
+ * 否则 clang 直接报错：
+ *     error: The deprecated ucontext routines require _XOPEN_SOURCE to be defined
+ * （这是第 46 轮在 CI 上炸出来的 —— 本机没有 ObjC 编译器，看不到。
+ *   它是特性测试宏，位置晚于第一个系统头就不生效，所以只能放在最前面。） */
+#define _XOPEN_SOURCE 600
+
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
