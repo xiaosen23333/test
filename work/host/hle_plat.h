@@ -44,6 +44,8 @@ int  dm_plat_thread_create(uint64_t entry, uint64_t arg, uint64_t sp,
 void dm_plat_thread_start(uint64_t handle);
 /* ExitThread：终止当前宿主 pthread（不返回）。 */
 void dm_plat_thread_exit(void);
+/* 堆现状（svc 0x29 GetInfo 用；未初始化时全 0）。 */
+void dm_plat_heap_peek(uint64_t *base, uint64_t *cap, uint64_t *cur);
 
 #endif /* aarch64 */
 
@@ -60,6 +62,9 @@ static int  dm_plat_thread_create(uint64_t e, uint64_t a, uint64_t s,
 }
 static void dm_plat_thread_start(uint64_t handle) { (void)handle; }
 static void dm_plat_thread_exit(void) { }
+static void dm_plat_heap_peek(uint64_t *base, uint64_t *cap, uint64_t *cur) {
+    if (base) *base = 0x10000000ull; if (cap) *cap = 3285ull << 20; if (cur) *cur = 0;
+}
 #endif
 
 #endif /* DM_HLE_PLAT_H */

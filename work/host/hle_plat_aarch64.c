@@ -286,6 +286,13 @@ int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
     return 0;
 }
 
+/* GetInfo 用（第 58 轮）：堆基址 / 池上限 / 已记账大小 */
+void dm_plat_heap_peek(uint64_t *base, uint64_t *cap, uint64_t *cur) {
+    if (base) *base = g_heap ? (uint64_t)g_heap : 0;
+    if (cap)  *cap  = g_heap ? g_heap_cap : 0;
+    if (cur)  *cur  = g_heap_cur;
+}
+
 /* ---------------- ⑥ 客体线程（svc 8/9/0A，第 57 轮加；D2R hle_thread.c 同语义） -----------
  *
  * Horizon ABI：CreateThread(→w1 句柄; x1 入口, x2 参数, x3 栈顶, w4 优先级, w5 核)

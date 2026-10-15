@@ -93,7 +93,7 @@ static const char *svc_name(uint32_t n) {
         [0x1e]="GetSystemTick", [0x1f]="ConnectToNamedPort",
         [0x21]="SendSyncRequest", [0x22]="SendSyncRequestWithUserBuffer",
         [0x23]="SendAsyncRequestWithUserBuffer", [0x25]="GetProcessId", [0x26]="GetThreadId",
-        [0x27]="Break", [0x29]="OutputDebugString", [0x2a]="GetInfo", [0x2b]="ConnectToPort",
+        [0x27]="Break", [0x28]="OutputDebugString", [0x29]="GetInfo", [0x2b]="ConnectToPort",
         [0x2c]="SetProcessMemoryPermission", [0x2d]="MapProcessMemory",
         [0x2f]="UnmapProcessMemory", [0x30]="QueryProcessMemory",
         [0x32]="TerminateProcess", [0x33]="GetProcessList", [0x34]="GetThreadList",
@@ -185,6 +185,81 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         dm_plat_thread_exit();
         r[DM_REG_X0] = 0;
         return 0;
+    case 0x1f: {  /* ConnectToNamedPort(name=x1) → x1=会话句柄（第 58 轮）。
+                     目前只认 "sm:"：SDK 的 nn::sm 初始化带 50ms 重试循环
+                     （sdk+0x15900c，连上后只查 svc 返回值，不解析应答缓冲）。 */
+        const char *name = (const char *)r[DM_REG_X1];
+        static int n_sm;
+        if (name && name[0] == 's' && name[1] == 'm' && name[2] == ':' && name[3] == 0) {
+            if (n_sm++ < 3) dm_diag_mark("[sm:] 连接 \"sm:\" → 成功（假会话，IPC 只回成功）");
+            r[DM_REG_X0] = 0;
+            r[DM_REG_X1] = 0xC0000001ull + (unsigned)n_sm;
+        } else {
+            char nb[12]; int k = 0;
+            for (; name && name[k] && k < 8; k++) nb[k] = name[k];
+            nb[k] = 0;
+            dm_diag_mark("[端口] ConnectToNamedPort(\"%s\") → 不存在", nb);
+            r[DM_REG_X0] = 0xE701ull;      /* NoSuchPort */
+        }
+        return 0; }
+    case 0x20: case 0x21: {  /* SendSyncRequest [WithUserBuffer]（第 58 轮）。
+                               回成功；把消息头记进诊断 —— CMIF 请求 magic 'SFCI'
+                               后面跟命令号，下轮需要应答时照这个补。 */
+        uint64_t buf = (n == 0x21) ? r[DM_REG_X0] : 0;
+        uint64_t sess = (n == 0x21) ? r[DM_REG_X2] : r[DM_REG_X0];
+        static unsigned n_ipc;
+        if (n_ipc++ < 24) {
+            unsigned w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+            if (buf) {
+                w0 = *(volatile unsigned *)buf;
+                w1 = *((volatile unsigned *)buf + 1);
+                w2 = *((volatile unsigned *)buf + 2);
+                w3 = *((volatile unsigned *)buf + 3);
+            }
+            dm_diag_mark("[ipc] 会话=%llx buf=%llx 头=%08x %08x %08x %08x",
+                         (unsigned long long)sess, (unsigned long long)buf, w0, w1, w2, w3);
+        }
+        r[DM_REG_X0] = 0;
+        return 0; }
+    case 0x27: {  /* Break(reason, ptr, size)：SDK 致命中止意图 —— 只记不放行崩溃
+                     （真致命时 SDK 自己会走 diag Abort，那里有完整停车+门历史） */
+        static int n_br;
+        if (n_br++ < 5) dm_diag_mark("[Break] reason=%llx ptr=%llx",
+                                     (unsigned long long)r[DM_REG_X0],
+                                     (unsigned long long)r[DM_REG_X1]);
+        r[DM_REG_X0] = 0;
+        return 0; }
+    case 0x28:  /* OutputDebugString(str, len) */
+        r[DM_REG_X0] = 0;
+        return 0;
+    case 0x29: {  /* GetInfo(id=x1, handle=x2, subid=x3) → x1 = 值（第 58 轮照 D2R 补全。
+                     注意：之前这里被错标成 OutputDebugString，SDK 的 4 次 GetInfo
+                     一直被垃圾 x1 糊弄 —— InfoType 表 = Atmosphère 标准编号）。 */
+        uint64_t id = r[DM_REG_X1], v = 0;
+        uint64_t hbase = 0, hcap = 0, hcur = 0;
+        dm_plat_heap_peek(&hbase, &hcap, &hcur);
+        void *sb = NULL; size_t ssz = 0;
+        dm_guest_stack_range(&sb, &ssz);
+        switch (id) {
+        case 2:  v = hbase; break;                       /* AliasRegionAddress：暂用堆池 */
+        case 3:  v = hcap; break;                        /* AliasRegionSize */
+        case 4:  v = hbase; break;                       /* HeapRegionAddress */
+        case 5:  v = hcap; break;                        /* HeapRegionSize */
+        case 6:  v = hcap; break;                        /* TotalMemorySize */
+        case 7:  v = hcur; break;                        /* UsedMemorySize */
+        case 8:  v = 0; break;                           /* DebuggerAttached */
+        case 11: v = dm_host_ticks(); break;             /* RandomEntropy */
+        case 14: v = (uint64_t)sb; break;                /* StackRegionAddress */
+        case 15: v = ssz; break;                         /* StackRegionSize */
+        case 16: v = 0x2000000ull; break;                /* SystemResource 总量（D2R） */
+        case 17: v = 0x400000ull; break;                 /* SystemResource 已用 */
+        case 18: v = 0x01001BA027DD8000ull; break;       /* ProgramId（本游戏 TID） */
+        case 21: v = hcap; break;                        /* TotalNonSystemMemorySize */
+        case 22: v = hcur; break;                        /* UsedNonSystemMemorySize */
+        case 23: v = 1; break;                           /* IsApplication */
+        default: v = 0; break;
+        }
+        r[DM_REG_X0] = 0; r[DM_REG_X1] = v; return 0; }
     case 0x0c:  /* GetThreadPriority(句柄) —— x1 = 优先级 */
         r[DM_REG_X0] = 0; r[DM_REG_X1] = 0x2C;
         return 0;
@@ -205,8 +280,6 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         return 0;
     case 0x16:  /* CloseHandle —— x0 = 结果码 */
         r[DM_REG_X0] = 0;
-        return 0;
-    case 0x29:  /* OutputDebugString */
         return 0;
     case 0x0b:  /* SleepThread —— 纳秒在 x1，负值 = yield */
         return 0;
