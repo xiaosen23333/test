@@ -389,18 +389,55 @@ int dm_boot_query_region(uint64_t addr, uint64_t *base, uint64_t *size,
  * 后者一用 nn::sf::hipc 的服务描述表（靠构造填的名字指针）就崩
  * （strlen(裸偏移 0x8ffad7)，.ips 202111）。调用于 _init_libc1 之后（libc 锁已就绪）、
  * nninitInitializeSdkModule 之前。 */
+/* 构造指针合法性检查：地址必须落在某个已装载模块的映像区间内。
+ * 第 62 轮真机崩在 PC = 0x10ac39d40（Invalid Page），而 Guest 映像在
+ * 0x10d10c000 —— 差着几十 MB，说明那一项要么基址补错了、要么压根不是代码地址。
+ * 与其一头撞进无效页（崩了只剩 .ips，看不出是谁），不如跳过并记下来：
+ * 启动能继续走，屏幕日志会指出是哪一项。 */
+static int dm_init_addr_ok(void *p, const char **which) {
+    uintptr_t a = (uintptr_t)p;
+    for (unsigned i = 0; i < g_ctx.nmods; i++) {
+        uintptr_t b = (uintptr_t)g_ctx.mods[i].base;
+        if (a >= b && a < b + g_ctx.mods[i].size) { if (which) *which = g_ctx.mods[i].name; return 1; }
+    }
+    return 0;
+}
+
 void dm_boot_run_module_inits(void) {
     for (unsigned i = 0; i < g_ctx.nmods; i++) {
         dm_module *m = &g_ctx.mods[i];
         unsigned done = 0;
+        /* 第 62 轮：逐项打点。真机崩在构造里（PC 跳进无效页），没有逐项日志
+         * 就只能看到「第 3/7 步：跑全局构造」，看不出是哪一个。日志先写后跳，
+         * 崩了以后屏幕上的「上次日志尾部」会停在崩的那一项。 */
+        dm_diag_mark("全局构造：模块 %s 映像 %p..%p（%zu 项）",
+                     m->name, m->base, (void *)((uintptr_t)m->base + m->size), m->init_array_n);
         if (m->dt_init) {
             void (*fn)(void) = (void (*)(void))m->dt_init;
-            fn();
-            done++;
+            const char *w = "?";
+            if (!dm_init_addr_ok((void *)fn, &w)) {
+                dm_diag_mark("**跳过高危构造** %s DT_INIT → %p（不在任何模块区间内：%s）",
+                             m->name, (void *)fn, w);
+            } else {
+                dm_diag_mark("全局构造：%s DT_INIT → %p", m->name, (void *)fn);
+                fn();
+                dm_diag_mark("全局构造：%s DT_INIT 已返回", m->name);
+                done++;
+            }
         }
         for (size_t k = 0; k < m->init_array_n; k++) {
             void (*fn)(void) = (void (*)(void))m->init_array[k];
-            if (fn) { fn(); done++; }
+            if (!fn) continue;
+            const char *w = "?";
+            if (!dm_init_addr_ok((void *)fn, &w)) {
+                dm_diag_mark("**跳过高危构造** %s init_array[%zu] → %p（不在任何模块区间内：%s）",
+                             m->name, k, (void *)fn, w);
+                continue;
+            }
+            dm_diag_mark("全局构造：%s init_array[%zu/%zu] → %p",
+                         m->name, k, m->init_array_n, (void *)fn);
+            fn();
+            done++;
         }
         if (done) dm_diag_mark("全局构造：模块 %u（%s）跑了 %u 个", i, m->name, done);
     }

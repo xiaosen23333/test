@@ -167,17 +167,18 @@ static void guest_main(void) {
         dm_diag_stage(3, "没有 _init_libc1 符号（跳过）");
     }
 
-    /* !! 第 61 轮：全局构造提前到第 4 步之前 !!
-     * 原来放在第 7 步（nninitStartup 之后），但第 4 步 nninitInitializeSdkModule
-     * 就要用 nn::sf::hipc 的服务描述表 —— 那张表靠构造函数填名字指针，
-     * 没填就是裸偏移：strlen(0x8ffad7) SIGSEGV（.ips 实证）。
-     * 真机上 rtld 在装载完模块就跑它们，本就早于一切 SDK 初始化。 */
-    {
-        extern void dm_boot_run_module_inits(void);   /* hle_nvn_boot.c */
-        dm_diag_stage(3, "跑各模块全局构造（DT_INIT + .init_array）");
-        dm_boot_run_module_inits();
-        dm_diag_stage(3, "全局构造已完成");
-    }
+    /* !! 第 62 轮：全局构造**不在这里跑**，挪到 _init_libc2 之后（见下面第 7 步）!!
+     * 第 61 轮曾把它提前到这里，理由是「第 4 步要用服务描述表」。但真机 .ips
+     * （DmGame-2026-10-15-222913）证明：在这里跑会直接跳进无效页
+     * —— PC = 0x10ac39d40（KERN_PROTECTION_FAILURE / Invalid Page），
+     *   不在 Guest 映像范围（Guest 在 0x10d10c000）。
+     * D2R Mobile 真机源码 dm/host/main.c:64-78 的顺序是逐字照抄 Start 的：
+     *   _init_libc0 → nnosInitialize → _init_libc1 → nninitInitializeSdkModule
+     *   → nninitStartup → _init_libc2 → 【各模块 DT_INIT + init_array】→ nnMain
+     * 也就是构造在 **SDK 初始化全部完成之后**。第 4 步要用服务描述表这件事，
+     * D2R 不是靠提前跑构造解决的，而是把 nninitInitializeSdkModule 调的 7 个
+     * 「连 Horizon 服务进程」的初始化**强制接管成空操作**（本轮已补齐，
+     * 见 hle_nvn_more.c 的 dm_nn_fs_InitializeForApplication 等）。 */
 
     if (P->sdk_module) {
         dm_diag_stage(4, "调用 nninitInitializeSdkModule");
@@ -203,8 +204,15 @@ static void guest_main(void) {
         dm_diag_stage(6, "没有 _init_libc2 符号（跳过）");
     }
 
-    /* 各模块 DT_INIT 已在第 3 步后随 .init_array 一起跑完（第 61 轮重排）。
-     * 这里保留计划里独立的 _init 兜底：ProtectRelro 的宿主实现幂等，重复调无害。 */
+    /* !! 第 7 步：各模块 DT_INIT + .init_array（全局构造）—— 照 D2R 放在 _init_libc2 之后 !!
+     * 这是 rtld 的「回调 B」。第 62 轮 .ips 证明提前到 SDK 初始化之前会跳进无效页。 */
+    {
+        extern void dm_boot_run_module_inits(void);   /* hle_nvn_boot.c */
+        dm_diag_stage(7, "跑各模块全局构造（DT_INIT + .init_array）");
+        dm_boot_run_module_inits();
+        dm_diag_stage(7, "全局构造已完成");
+    }
+    /* 计划里独立的 _init 兜底：ProtectRelro 的宿主实现幂等，重复调无害。 */
     if (P->init_array) {
         dm_diag_stage(7, "补跑计划里的 _init（兜底）");
         ((fn0)P->init_array)();
