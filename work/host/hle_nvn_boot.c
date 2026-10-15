@@ -367,6 +367,22 @@ int dm_boot_query_region(uint64_t addr, uint64_t *base, uint64_t *size,
             return 1;
         }
     }
+    /* 第 64 轮：alias 区（SDK 的 VammManager 用；见 hle.c 的 g_alias）。
+       这段是宿主预留的地址空间，SDK 拿它挑空位、再用 svc 0x2C 打开那页。
+       查询落在里面就回报整段为「空闲」（state 0）—— 与 D2R 的口径一致
+       （D2R 也是登记已映射区间、其余按空闲回报）。 */
+    {
+        extern void dm_guest_alias_range(void **base, size_t *size);
+        void *ab = NULL; size_t asz = 0;
+        dm_guest_alias_range(&ab, &asz);
+        if (ab && asz && addr >= (uint64_t)ab && addr < (uint64_t)ab + asz) {
+            if (base) *base = (uint64_t)ab;
+            if (size) *size = asz;
+            if (state) *state = 0;    /* Free */
+            if (perm)  *perm  = 0;
+            return 1;
+        }
+    }
     {
         void *sb = NULL; size_t ssz = 0;
         dm_guest_stack_range(&sb, &ssz);

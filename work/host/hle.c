@@ -179,6 +179,14 @@ static void dm_alias_ensure(void) {
     dm_diag_mark("alias 区 %p +%#zx（SDK 的 VammManager 用）", (void *)g_alias, g_alias_cap);
 }
 
+/* 给 svc 6 QueryMemory 用（hle_nvn_boot.c 的 dm_boot_query_region）：查询落在 alias
+   区里就回报整段为「空闲」，SDK 才知道去哪儿挑空位。 */
+void dm_guest_alias_range(void **base, size_t *size) {
+    dm_alias_ensure();
+    if (base) *base = g_alias;
+    if (size) *size = g_alias_cap;
+}
+
 static int host_svc_impl(uint64_t *r, uint32_t n) {
     switch (n) {
     case 0x1e:  /* GetSystemTick —— x0 就是 tick 值 */
@@ -355,6 +363,55 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
     case 0x2b:   /* FlushDataCache(addr, size) */
         r[DM_REG_X0] = 0;
         return 0;
+    /* 第 64 轮顺带补的「内存族」（都是**承诺了一块内存可用**的 svc：假成功比报错更糟，
+       SDK 拿到成功就回去读写，页没打开立刻段错误 —— 0x2C 已经实证过一次）。 */
+    case 0x02:   /* SetMemoryPermission(dst, size, perm)：D2R 直接回成功（我们不改页权限） */
+    case 0x03:   /* SetMemoryAttribute(dst, size, attr0, attr1)：同上 */
+        r[DM_REG_X0] = 0;
+        return 0;
+    case 0x04: {  /* MapMemory(dst=x0, src=x1, size=x2) —— 搬移语义：把 src 的内容搬到 dst，
+                     期间 src 不可访问。D2R：目标是栈区，mprotect 成可读写后 memcpy。
+                     我们没有预留栈区，所以保守处理：先试 mprotect（说明本来就有映射），
+                     失败再 mmap 一段固定的匿名内存补上；然后搬内容。 */
+        uint8_t *dst = (uint8_t *)r[DM_REG_X0], *src = (uint8_t *)r[DM_REG_X1];
+        size_t sz = (size_t)r[DM_REG_X2];
+        if (!dst || !sz || sz > (256u << 20)) {
+            dm_diag_mark("**svc 0x04 MapMemory 参数可疑** dst=%p src=%p size=%#zx",
+                         (void *)dst, (void *)src, sz);
+            r[DM_REG_X0] = 0xD401ull;
+            return 0;
+        }
+        int rc;
+#if defined(_WIN32)
+        { DWORD old; rc = VirtualProtect(dst, sz, PAGE_READWRITE, &old) ? 0 : 1;
+          if (rc) rc = (VirtualAlloc(dst, sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) == NULL); }
+#else
+        rc = mprotect(dst, sz, PROT_READ | PROT_WRITE);
+        if (rc) {
+            void *q = mmap(dst, sz, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+            rc = (q == MAP_FAILED);
+        }
+#endif
+        if (rc) {
+            dm_diag_mark("**svc 0x04 MapMemory 打不开目标** %p+%#zx", (void *)dst, sz);
+            r[DM_REG_X0] = 0xDC01ull;
+            return 0;
+        }
+        if (src) memcpy(dst, src, sz);
+        dm_diag_mark("svc MapMemory %p <- %p +%#zx", (void *)dst, (void *)src, sz);
+        r[DM_REG_X0] = 0;
+        return 0; }
+    case 0x05: {  /* UnmapMemory(dst=x0, src=x1, size=x2)：内容搬回源区（D2R 同款）。
+                     16K 页可能与相邻映射共用，所以不收回权限（收了会误伤）。 */
+        uint8_t *dst = (uint8_t *)r[DM_REG_X0], *src = (uint8_t *)r[DM_REG_X1];
+        size_t sz = (size_t)r[DM_REG_X2];
+        if (dst && src && sz && sz <= (256u << 20)) {
+            memcpy(src, dst, sz);
+            dm_diag_mark("svc UnmapMemory %p -> %p +%#zx", (void *)dst, (void *)src, sz);
+        }
+        r[DM_REG_X0] = 0;
+        return 0; }
     case 0x2c: case 0x2d: {  /* MapPhysicalMemory / UnmapPhysicalMemory(addr=x0, size=x1)
                      第 64 轮加，照 D2R hle_svc.c 的 0x2C/0x2D：只许在 alias 区内，
                      0x2C 把这段 mprotect 成可读写、0x2D 收回成不可访问。
