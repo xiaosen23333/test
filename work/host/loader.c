@@ -316,12 +316,32 @@ int dm_loader_map_embedded(dm_module *m, unsigned idx, const char *name,
                      path ? path : "(null)", dlerror() ? dlerror() : "?");
         return -2;
     }
-    const struct mach_header_64 *mh = (const struct mach_header_64 *)h;
+
+    /* !! dlopen 只用来「确保它被加载」，**绝不能拿它的返回值当 mach_header** !!
+     * 第 51 轮真机崩溃报告（DmGame-2026-10-15-173419.ips）：
+     *     #0 libmacho.dylib  getsectiondata
+     *     #1 DmGame          dm_loader_map_embedded
+     *     EXC_BAD_ACCESS / KERN_INVALID_ADDRESS at 0x679d1080
+     * 原因就是我直接把 dlopen 的句柄转成 mach_header 传给了 getsectiondata。
+     * 正确做法（照 D2R 的 dm/host/loader.c：它也是 dlopen 之后再去 dyld 的映像表里找）：
+     * 用 _dyld_get_image_header 按映像名匹配，拿到真正的 mach_header。 */
+    const struct mach_header_64 *mh = NULL;
+    for (uint32_t i = 0, n = _dyld_image_count(); i < n; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, "/Guest.framework/Guest"))
+            mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
+    }
+    if (!mh) {
+        dm_diag_mark("**找不到 Guest 映像头**：dlopen 成功，但 dyld 映像表里没有 "
+                     "*/Guest.framework/Guest（共 %u 个映像）", (unsigned)_dyld_image_count());
+        return -3;
+    }
 
     char sn0[20], sn1[20], wn[20];
     snprintf(sn0, sizeof sn0, "__dm%ux0", idx);
     snprintf(sn1, sizeof sn1, "__dm%ux1", idx);
     snprintf(wn,  sizeof wn,  "__DM%uW",  idx);
+    dm_diag_mark("Guest 映像头 = %p（按映像名找到）", (const void *)mh);
     unsigned long s0 = 0, sw = 0, s1 = 0;
     const uint8_t *p0 = getsectiondata(mh, "__TEXT", sn0, &s0);
     const uint8_t *pw = getsectiondata(mh, wn,     "__img", &sw);
