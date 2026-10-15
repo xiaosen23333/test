@@ -460,7 +460,9 @@ static void dm_install_watchdog(void) {
     /* 状态文字叠在 Metal 层上（左上角），黑屏时也能看到进度。
      * 行数给足 8 行：本次状态 + 一行总览 + 「上次运行的最后几行」+ 日志尾部。
      * 字体用等宽 —— 数字对齐，帧计数与 NVN 计数好读。 */
-    g_status = [[UILabel alloc] initWithFrame:CGRectMake(16, 30, self.view.bounds.size.width - 32, 200)];
+    g_status = [[UILabel alloc] initWithFrame:CGRectMake(16, 30, self.view.bounds.size.width - 32, 300)];
+    /* 高度给到 300pt：12pt 等宽字一行约 15pt，16 行 ≈ 240pt —— 不留够会把
+       **最后几行（也就是最有用的日志尾部）裁掉**，那样用户念回来的信息就丢了 */
     g_status.numberOfLines = 16;   /* 状态 + 总览 + 「上次运行」+ 最多 12 行日志尾部 */
     g_status.textColor = [UIColor whiteColor];
     g_status.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
