@@ -26,6 +26,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>       /* VirtualAlloc / VirtualProtect —— alias 区的 Windows 侧 */
+#else
+#include <sys/mman.h>      /* mmap / mprotect —— alias 区（svc 0x2C/0x2D）用 */
+#endif
 
 /* Windows 自测覆盖 dm_plat_tlr_addr() 的返回值（hle_plat.h 已声明 extern）。
  * 放在 hle.c 里是为了让每个链接 hle.c 的 exe 都有定义（避免其它自测 LNK2019）。 */
@@ -145,6 +150,35 @@ static int x0_is_result_code(uint32_t n) {
 
 /* svc 实现：返回 0 = 已处理（regs 已写好内容）；2 = 未实现（dispatch 按「假成功」
    x0=0 处理并记日志）。-1 这个旧语义（未实现→错误码）第 59 轮已弃用。 */
+/* ---------------- alias 区（SDK 的 VammManager 用；照 D2R hle_svc.c）----------------
+ * Horizon 里「别名区」是一段**预留的地址空间**：MapPhysicalMemory 把其中的页变成
+ * 可读写，UnmapPhysicalMemory 再收回去。SDK 初始化时靠 GetInfo(2/3) 拿它的位置和
+ * 大小，之后 SDK 自己在这段里挑地址、再用 svc 0x2C 把那一页「打开」。
+ *
+ * 我们之前把 GetInfo(2/3) 报成堆池、又没实现 0x2C —— SDK 拿到「成功」但页根本没
+ * 打开，回头一写就 SIGSEGV。第 64 轮 .ips 实证：
+ *   [svc] 44 MapPhysicalMemory ... **未实现>假成功**
+ *   [崩溃] 信号 11、故障地址 0x0、PC 0x10ab833b8 (sdk+0x1133b8)、第 4 步
+ *
+ * 所以这里照 D2R：单独预留一段（512 MB，PROT_NONE，只占地址空间不占内存），
+ * 0x2C 把它 mprotect 成 RW、0x2D 收回成 NONE，越界则照 D2R 报 0xD401。 */
+#define DM_ALIAS_CAP 0x20000000ull      /* 512 MB，与 D2R 的 g_alias_cap 同 */
+static uint8_t *g_alias;
+static size_t   g_alias_cap;
+
+static void dm_alias_ensure(void) {
+    if (g_alias) return;
+#if defined(_WIN32)
+    g_alias = (uint8_t *)VirtualAlloc(NULL, (SIZE_T)DM_ALIAS_CAP, MEM_RESERVE, PAGE_NOACCESS);
+#else
+    void *p = mmap(NULL, (size_t)DM_ALIAS_CAP, PROT_NONE,
+                   MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+    g_alias = (p == MAP_FAILED) ? NULL : (uint8_t *)p;
+#endif
+    g_alias_cap = g_alias ? (size_t)DM_ALIAS_CAP : 0;
+    dm_diag_mark("alias 区 %p +%#zx（SDK 的 VammManager 用）", (void *)g_alias, g_alias_cap);
+}
+
 static int host_svc_impl(uint64_t *r, uint32_t n) {
     switch (n) {
     case 0x1e:  /* GetSystemTick —— x0 就是 tick 值 */
@@ -321,6 +355,36 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
     case 0x2b:   /* FlushDataCache(addr, size) */
         r[DM_REG_X0] = 0;
         return 0;
+    case 0x2c: case 0x2d: {  /* MapPhysicalMemory / UnmapPhysicalMemory(addr=x0, size=x1)
+                     第 64 轮加，照 D2R hle_svc.c 的 0x2C/0x2D：只许在 alias 区内，
+                     0x2C 把这段 mprotect 成可读写、0x2D 收回成不可访问。
+                     注意 x1 是**入参 size**、不是出参，别动它（D2R 也不动）。 */
+        dm_alias_ensure();
+        uint8_t *a = (uint8_t *)r[DM_REG_X0];
+        size_t sz = (size_t)r[DM_REG_X1];
+        if (!g_alias || !a || (uintptr_t)a < (uintptr_t)g_alias ||
+            (uintptr_t)a + sz > (uintptr_t)g_alias + g_alias_cap) {
+            dm_diag_mark("**svc %#x 越出 alias 区** %p+%#zx（区 %p+%#zx）",
+                         n, (void *)a, sz, (void *)g_alias, g_alias_cap);
+            r[DM_REG_X0] = 0xD401ull;      /* 无效地址（D2R 同款） */
+            return 0;
+        }
+        int rc;
+#if defined(_WIN32)
+        DWORD old;
+        rc = VirtualProtect(a, sz, (n == 0x2c) ? PAGE_READWRITE : PAGE_NOACCESS, &old) ? 0 : 1;
+#else
+        rc = mprotect(a, sz, (n == 0x2c) ? (PROT_READ | PROT_WRITE) : PROT_NONE);
+#endif
+        if (rc) {
+            dm_diag_mark("**svc %#x mprotect 失败** %p+%#zx", n, (void *)a, sz);
+            r[DM_REG_X0] = 0xD401ull;
+            return 0;
+        }
+        dm_diag_mark("svc %sPhysicalMemory %p+%#zx",
+                     n == 0x2c ? "Map" : "Unmap", (void *)a, sz);
+        r[DM_REG_X0] = 0;
+        return 0; }
     case 0x29: {  /* GetInfo(id=x1, handle=x2, subid=x3) → x1 = 值（第 58 轮照 D2R 补全。
                      注意：之前这里被错标成 OutputDebugString，SDK 的 4 次 GetInfo
                      一直被垃圾 x1 糊弄 —— InfoType 表 = Atmosphère 标准编号）。 */
@@ -331,8 +395,11 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         void *sb = NULL; size_t ssz = 0;
         dm_guest_stack_range(&sb, &ssz);
         switch (id) {
-        case 2:  v = hbase; break;                       /* AliasRegionAddress：暂用堆池 */
-        case 3:  v = hcap; break;                        /* AliasRegionSize */
+        /* 第 64 轮：别名区**必须**是独立的一段，不能拿堆池顶替 —— SDK 的 VammManager
+           拿它挑地址后再用 svc 0x2C 打开那页；报成堆池会让 0x2C 的越界检查全落空，
+           页没打开就回去写 → SIGSEGV（.ips 实证）。 */
+        case 2:  dm_alias_ensure(); v = (uint64_t)g_alias; break;   /* AliasRegionAddress */
+        case 3:  dm_alias_ensure(); v = g_alias_cap; break;         /* AliasRegionSize */
         case 4:  v = hbase; break;                       /* HeapRegionAddress */
         case 5:  v = hcap; break;                        /* HeapRegionSize */
         case 6:  v = hcap; break;                        /* TotalMemorySize */
