@@ -101,6 +101,32 @@ def check(path):
                 break
     return bad, declared
 
+
+# 文件作用域的 static 变量：C 里变量**没有前向声明**，用在声明之前就是硬错误。
+# （第 47 轮真踩过：g_heartbeat 声明写在了 frame_tick 后面 —— 函数检查抓不到这一类。）
+STATIC_VAR_RE = re.compile(r'^static\s+[\w\s\*]*?\b([A-Za-z_]\w*)\s*(?:=|\[|;)')
+
+def check_static_vars(path):
+    text = open(path, encoding='utf-8', errors='replace').read()
+    code = strip_code(text)
+    lines = code.split('\n')
+    decl = {}
+    for ln, line in enumerate(lines, 1):
+        if not line.startswith('static'):
+            continue                      # 只认**顶格**写的（文件作用域）
+        m = STATIC_VAR_RE.match(line)
+        if m:
+            decl.setdefault(m.group(1), ln)
+    bad = []
+    for name, dln in decl.items():
+        for ln, line in enumerate(lines, 1):
+            if ln >= dln:
+                break
+            if re.search(r'\b%s\b' % re.escape(name), line):
+                bad.append((name, ln, dln))
+                break
+    return bad, decl
+
 def main():
     files = []
     for t in TARGETS:
@@ -131,12 +157,30 @@ def main():
                 print('     第 %4d 行调用 %-28s 但第 %4d 行才声明' % (call_ln, name, decl_ln))
         else:
             print('   OK  %-56s (%d 个本文件内函数)' % (rel, len(declared)))
+
+    print()
+    print('=' * 78)
+    print('检查「文件作用域 static 变量：用在声明之前」—— 变量**没有**前向声明')
+    print('=' * 78)
+    vtotal = 0
+    for p in files:
+        bad, decl = check_static_vars(p)
+        rel = os.path.relpath(p, os.path.dirname(ROOT)).replace('\\', '/')
+        if bad:
+            vtotal += len(bad)
+            print('\n!! %s  —— %d 处' % (rel, len(bad)))
+            for name, use_ln, decl_ln in bad:
+                print('     第 %4d 行用了 %-28s 但第 %4d 行才声明' % (use_ln, name, decl_ln))
+        else:
+            print('   OK  %-56s (%d 个顶格 static 变量)' % (rel, len(decl)))
+    total += vtotal
+
     print()
     print('=' * 78)
     if total:
-        print('结果：**%d 处需要修** —— 在 Mac 上会编译失败（implicit function declaration）' % total)
+        print('结果：**%d 处需要修** —— 在 Mac 上会编译失败' % total)
     else:
-        print('结果：全部通过（没有「先调用后声明」）')
+        print('结果：全部通过（没有「先调用后声明」，也没有「变量先用后声明」）')
     print('=' * 78)
     return 1 if total else 0
 

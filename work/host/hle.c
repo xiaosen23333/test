@@ -15,6 +15,7 @@
  *   - svc 存根的 x8 里**没有**调用号（形状是 `svc #n · ret`），所以必须靠返回点辨别
  */
 #include "hle.h"
+#include "hle_diag.h"    /* dm_diag_gate：记下门调用站点（区分「客体自旋」与「死在宿主 HLE」） */
 
 /* MSVC 把 sscanf 标为不安全；这里输入是我们自己产出的 tsv，不需要 _s 版本 */
 #if defined(_MSC_VER)
@@ -168,6 +169,9 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
 /* ---------------- 分发 ---------------- */
 
 void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs) {
+    /* 记下这一笔（便宜的一次数组写）：卡死/崩溃时靠它看出最后几个门是哪些客体站点 */
+    dm_diag_gate(ret);
+
     const dm_gate_ent *e = dm_host_find(h, ret);
     if (!e) {
         h->n_unknown++;

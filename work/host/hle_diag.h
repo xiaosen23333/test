@@ -79,4 +79,20 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
                         unsigned long long pc, unsigned long long lr,
                         unsigned long long sp, const unsigned long long *x, int nx);
 
+/* ---- 门调用记录（第 47 轮加）----
+ * 客体每次经门（svc / 读 cntpct）进宿主时记下返回点。用处：
+ * 崩溃/卡死时能看到最后几个门调用是**哪些客体站点** —— 用来区分
+ *   「在客体代码里自旋」 与  「死在某个宿主 HLE 里（比如等一个永远不来的锁）」。
+ * 只做一次数组写入，很便宜；可以每帧都调。 */
+void dm_diag_gate(unsigned long long ret);
+
+/* ---- 看门狗（第 47 轮加）----
+ * 主线程**卡住**和**崩溃**是两种完全不同的情况：
+ *   · 崩溃 → 信号处理写 [崩溃] 行（dm_diag_crash_line）
+ *   · 卡住 → 主线程不再前进，信号不会来，屏幕也刷不动
+ * 所以由 iOS 外壳起一个看门狗线程，发现「主线程 N 秒没有进展」时写一行
+ * [看门狗]，把当前阶段与最近门调用一起记下来。
+ * 本函数在**普通线程**里被调（不是信号上下文），可以用 stdio。 */
+void dm_diag_hang_line(unsigned long long seconds);
+
 #endif /* DM_HLE_DIAG_H */

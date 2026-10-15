@@ -74,6 +74,7 @@ static id<MTLDevice>    g_device = nil;
 static CADisplayLink   *g_link = nil;
 static int              g_running = 0;
 static uint64_t         g_frames = 0;      /* 帧计数（状态文字显示用，见 frame_tick） */
+static volatile uint64_t g_heartbeat = 0; /* 看门狗心跳：frame_tick 每帧 +1（声明必须在 frame_tick 之前） */
 
 /* ------------------------------------------------------------------ */
 /* 前置声明 —— 这两行**不能删**                                        */
@@ -184,6 +185,7 @@ static void frame_tick(void) {
          * !! 注意：如果客体（游戏）跑在主线程上不返回，**连这一句也刷不出来** ——
          *   那时候唯一的线索是 <Documents>/dm-log.txt（下次启动会显示在屏幕上）。 */
         g_frames++;
+        g_heartbeat = g_frames;          /* 看门狗靠它判断主线程有没有在前进 */
         if (g_frames % 30 == 1)
             status_set(@"帧循环运行中，第 %llu 帧", (unsigned long long)g_frames);
     }
@@ -333,6 +335,51 @@ static void dm_install_crash_handlers(void) {
     dm_diag_mark("崩溃捕获已装好（%u 个信号）", (unsigned)(sizeof sigs / sizeof sigs[0]));
 }
 
+/* ------------------------------------------------------------------ */
+/* 看门狗：区分「卡死」与「崩溃」                                      */
+/* ------------------------------------------------------------------ */
+/* 为什么需要（第 47 轮加）：
+ *   真机上出现的是**卡住**而不是崩溃时会很迷惑 —— 信号不会来，
+ *   而主线程被客体占住，屏幕上的字也刷不动（所以屏幕上永远停在"进客体之前"那一帧）。
+ *   看门狗跑在**自己的线程**上：发现帧循环心跳 N 秒没动，就往日志里写一行
+ *   [看门狗]，带上「当前阶段」与「最近几次门调用」。
+ *   下次启动时屏幕会显示日志尾部 —— 于是"卡住"也变成可读的线索。 */
+static int               g_watchdog_started = 0;
+
+static void dm_install_watchdog(void) {
+    if (g_watchdog_started) return;
+    g_watchdog_started = 1;
+
+    /* 3 秒后开始，每 2 秒看一次 */
+    dispatch_source_t t = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(t,
+                              dispatch_time(DISPATCH_TIME_NOW, 3ull * NSEC_PER_SEC),
+                              2ull * NSEC_PER_SEC,
+                              200ull * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(t, ^{
+        static uint64_t last = 0;
+        static int      stall_ticks = 0;
+        static int      reported = 0;
+        uint64_t now = g_heartbeat;
+        if (now == last) {
+            stall_ticks++;
+            /* 连读 4 次没动 ≈ 8 秒 → 判定卡住，只报一次 */
+            if (stall_ticks >= 4 && !reported) {
+                reported = 1;
+                dm_diag_hang_line((unsigned long long)(stall_ticks * 2));
+            }
+        } else {
+            stall_ticks = 0;
+            reported = 0;
+        }
+        last = now;
+    });
+    dispatch_resume(t);
+    dm_diag_mark("看门狗已启动（心跳不动 8 秒就写一行 [看门狗]）");
+}
+
 @interface DmVC : UIViewController
 @end
 @implementation DmVC
@@ -408,6 +455,8 @@ UIWindow *dm_ios_make_window(void) {
     dm_diag_mark("=== 本次启动（窗口已建）—— 日志 %s ===", dm_ios_log_path());
     /* 崩溃捕获要在装载之前装好 —— 装载与进客体都可能崩 */
     dm_install_crash_handlers();
+    /* 看门狗也一起起：区分「卡死」与「崩溃」（客体占住主线程时屏幕刷不动） */
+    dm_install_watchdog();
     return w;
 }
 

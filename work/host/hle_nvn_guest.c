@@ -107,20 +107,29 @@ static void guest_main(void) {
      * 为什么重要：客体**跑在主线程上**，它一旦不返回，屏幕上的字就再也不会更新
      * （CADisplayLink 的回调卡在这里面）。所以这五条标记写的是**日志文件**，
      * 而且每写一条就 fflush —— 真机上崩溃/卡死之后，日志里最后一条就是答案。
-     * 下一次启动时，iOS 外壳会把日志尾部直接显示在屏幕上。 */
+     * 下一次启动时，iOS 外壳会把日志尾部直接显示在屏幕上。
+     *
+     * !! 第 47 轮改的顺序（有真机证据）!!
+     *   真机日志停在「第 1 步：调用 _init（C++ 静态构造）」—— 后面**没有**「_init 已返回」，
+     *   说明卡在 _init 里面。而按 D2R 的记录，`_init_libc1` 必须**最先**跑：
+     *     「略过它会在 putc 嵌套加锁时自锁死」（本文件开头引的就是这句）。
+     *   上一版恰好把 _init 放在 _init_libc1 前面 —— 于是 _init 里的任何输出
+     *   （静态构造很常见）都会去拿还没初始化成递归锁的 libc 锁 → 自锁死 → 卡住。
+     *   现在改成：**_init_libc1 最先**，再 _init（C++ 静态构造）。 */
     if (P->init_libc1) {
-        /* 先跑 C++ 静态构造（__init_array），再初始化 libc 锁 ——
-           这两个的先后在真机上可能要调（见上） */
-        if (P->init_array) {
-            dm_diag_stage(1, "调用 _init（C++ 静态构造）");
-            ((fn0)P->init_array)();
-            dm_diag_stage(1, "_init 已返回");
-        }
-        dm_diag_stage(1, "调用 _init_libc1（libc 锁初始化，略过会自锁死）");
+        dm_diag_stage(1, "调用 _init_libc1（libc 锁初始化，必须最先 —— 略过会自锁死）");
         ((fn0)P->init_libc1)();
         dm_diag_stage(1, "_init_libc1 已返回");
     } else {
         dm_diag_stage(1, "**没有 _init_libc1 符号**（计划里是空的）");
+    }
+
+    if (P->init_array) {
+        dm_diag_stage(1, "调用 _init（C++ 静态构造 / __init_array）");
+        ((fn0)P->init_array)();
+        dm_diag_stage(1, "_init 已返回");
+    } else {
+        dm_diag_stage(1, "**没有 _init 符号**（静态构造没人跑）");
     }
 
     if (P->os_initialize) {

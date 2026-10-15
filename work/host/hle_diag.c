@@ -194,8 +194,7 @@ void dm_diag_set_module(const char *name, const void *base, unsigned long long s
     m->size = size;
 }
 
-int dm_diag_addr(unsigned long long addr, char *out, int n) {
-    for (int i = 0; i < g_nmods; i++) {
+int dm_diag_addr(unsigned long long addr, char *out, int n) {    for (int i = 0; i < g_nmods; i++) {
         unsigned long long b = g_mods[i].base;
         if (addr >= b && addr < b + g_mods[i].size) {
             int k = 0;
@@ -213,6 +212,53 @@ int dm_diag_addr(unsigned long long addr, char *out, int n) {
         }
     }
     return 0;
+}
+
+/* ---- 门调用记录 ---- */
+#define DM_DIAG_GATE_N 4
+static unsigned long long g_gate_ret[DM_DIAG_GATE_N];
+static unsigned long long g_gate_total = 0;
+static int                g_gate_pos = 0;
+
+void dm_diag_gate(unsigned long long ret) {
+    g_gate_total++;
+    g_gate_ret[g_gate_pos] = ret;
+    g_gate_pos = (g_gate_pos + 1) % DM_DIAG_GATE_N;
+}
+
+/* 把最近的门调用写成「模块+偏移」追加到 sb 里（最近的在最后） */
+static void sb_gates(sb_t *b) {
+    char nm[40];
+    if (!g_gate_total) { sb_s(b, "（还没有门调用）"); return; }
+    sb_s(b, "共 "); sb_dec(b, g_gate_total); sb_s(b, " 次，最近 ");
+    unsigned n = (g_gate_total < (unsigned long long)DM_DIAG_GATE_N)
+                 ? (unsigned)g_gate_total : DM_DIAG_GATE_N;
+    for (unsigned i = 0; i < n; i++) {
+        /* 从最老的开始打印 */
+        int idx = (g_gate_pos - n + (int)i + DM_DIAG_GATE_N * 2) % DM_DIAG_GATE_N;
+        unsigned long long v = g_gate_ret[idx];
+        sb_s(b, " ");
+        if (dm_diag_addr(v, nm, (int)sizeof nm)) sb_s(b, nm);
+        else sb_hex(b, v);
+    }
+}
+
+void dm_diag_hang_line(unsigned long long seconds) {
+    char buf[520];
+    sb_t b = { buf, 0, (int)sizeof buf };
+    sb_s(&b, "\n[看门狗] 主线程 ");
+    sb_dec(&b, seconds);
+    sb_s(&b, " 秒没有进展（帧循环不再前进）\n[看门狗] 当前阶段: ");
+    sb_s(&b, g_stage);
+    sb_s(&b, "\n[看门狗] 最近门调用: ");
+    sb_gates(&b);
+    sb_s(&b, "\n");
+    sb_c(&b, 0);
+#if defined(__unix__) || defined(__APPLE__)
+    if (g_logfd >= 0) { ssize_t w = write(g_logfd, buf, (size_t)b.n - 1); (void)w; }
+#else
+    if (g_log) { fputs(buf, g_log); fflush(g_log); }
+#endif
 }
 
 void dm_diag_crash_line(int sig, unsigned long long fault_addr,
@@ -235,6 +281,7 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
         for (int i = 0; i < nx; i++) { sb_s(&b, " x"); sb_dec(&b, (unsigned)i); sb_s(&b, "="); sb_hex(&b, x[i]); }
     }
     sb_s(&b, "\n[崩溃] 最后阶段: "); sb_s(&b, g_stage);
+    sb_s(&b, "\n[崩溃] 最近门调用: "); sb_gates(&b);
     sb_s(&b, "\n");
     sb_c(&b, 0);
 
