@@ -432,6 +432,26 @@ void dm_boot_run_module_inits(void) {
     for (unsigned i = 0; i < g_ctx.nmods; i++) {
         dm_module *m = &g_ctx.mods[i];
         unsigned done = 0;
+        /* !! 第 71 轮：**跳过 rtld 的全局构造**（真机 .ips 实证）!!
+         *
+         * 为什么：rtld 是「入口驱动」模块 —— 它导出 **0 个符号**、自己只引用
+         * nn::os::detail::UserExceptionHandler 和 nn::init::Start。真机上的链路是
+         *   nnLoader 装载 rtld → 运行它 → 它装载 main/sdk → 调 nn::init::Start(…回调…)
+         *   → Start 里才跑 _init_libc0/nnosInitialize/…/各模块 DT_INIT（回调 B）→ nnMain。
+         * 也就是说：**rtld 的代码是「Start 的调用者」，本工程的宿主扮演的正是它的位置**
+         * （我们直接按 D2R 的脚本跑 Start 的 8 步；D2R 的模块清单默认只有 {main, sdk}，
+         * 也从不执行 rtld）。
+         *
+         * 硬跑它的后果（本轮 .ips）：rtld 的 DT_INIT 是「装载器给自己做自配置」的代码 ——
+         * 它读自己数据段里一张**裸偏移表**（rtld+0x4198 → 0x5048 等；该模块整个只有
+         * 2 条重定位，没有任何东西给这些槽加基址），把 0x5048 当指针解引用
+         * → [0x5048+0x20] = 0x5068（未映射）→ SIGSEGV。
+         * 真机上这些值由系统装载器在装载 rtld 时安排好——我们不扮演那一步，也不需要：
+         * 装载本来就是宿主做的，rtld 的代码在我们的移植里没有任何调用者。 */
+        if (!strcmp(m->name, "rtld")) {
+            dm_diag_mark("全局构造：**跳过 rtld**（宿主扮演装载器/Start，其 DT_INIT 是装载器自配置代码）");
+            continue;
+        }
         /* 第 62 轮：逐项打点。真机崩在构造里（PC 跳进无效页），没有逐项日志
          * 就只能看到「第 3/7 步：跑全局构造」，看不出是哪一个。日志先写后跳，
          * 崩了以后屏幕上的「上次日志尾部」会停在崩的那一项。 */
