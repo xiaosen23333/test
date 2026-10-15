@@ -270,22 +270,22 @@ int dm_loader_exec_selftest(void) {
 }
 
 #if defined(__APPLE__)
-  /* mach_vm_region 在 <mach/mach_vm.h> 里，不在 <mach/mach.h>；
-     VM_REGION_BASIC_INFO_64 / vm_region_basic_info_data_64_t 在 <mach/vm_region.h>。
-     （CI #21 报的就是「call to undeclared function 'mach_vm_region'」。） */
+  /* 注意：**不要**包含 <mach/mach_vm.h> —— iOS 的 SDK 里那个文件第一行就是
+     `#error mach_vm.h unsupported.`（CI #22 报的就是它）。
+     改用 vm_region_64（<mach/vm_map.h>，被 <mach/mach.h> 包含；iOS 上可用），
+     类型从 <mach/vm_region.h> 来。 */
   #include <mach/mach.h>
-  #include <mach/mach_vm.h>
   #include <mach/vm_region.h>
   /* 把 VM_PROT_* 折叠成 1=R / 2=W / 4=X */
   static int darwin_vm_prot(uintptr_t addr, unsigned *prot_out) {
-      mach_vm_address_t a = (mach_vm_address_t)addr;
-      mach_vm_size_t sz = 0;
+      vm_address_t a = (vm_address_t)addr;
+      vm_size_t sz = 0;
       vm_region_basic_info_data_64_t info;
       mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
       mach_port_t obj = MACH_PORT_NULL;
-      kern_return_t kr = mach_vm_region(mach_task_self(), &a, &sz,
-                                        VM_REGION_BASIC_INFO_64,
-                                        (vm_region_info_t)&info, &cnt, &obj);
+      kern_return_t kr = vm_region_64(mach_task_self(), &a, &sz,
+                                      VM_REGION_BASIC_INFO_64,
+                                      (vm_region_info_t)&info, &cnt, &obj);
       if (kr != KERN_SUCCESS) return -1;
       unsigned q = 0;
       if (info.protection & VM_PROT_READ)    q |= 1;
