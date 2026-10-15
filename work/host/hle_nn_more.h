@@ -65,6 +65,15 @@ int  dm_nn_nifm_stub(void *a1, void *a2, void *a3, void *a4);
 void dm_nn_nifm_Initialize(void);
 const void *dm_misc_stats_ptr(void);
 
+/* 服务层初始化：nninitInitializeSdkModule 调的「连 Horizon 服务进程」那批，
+   宿主没有服务进程 → 一律空操作（依据 D2R Mobile dm/host/hle_sdkinit.c） */
+void dm_nn_fs_InitializeForApplication(void);
+void dm_nn_diag_AbortObserver(void);
+void dm_nn_err_InitCtx(void);
+void dm_nn_aoc_Initialize(void);
+void dm_nn_pctl_Initialize(void);
+void dm_nn_nndiagStartup(void);
+
 /* ---------- 程序化生成的实现表 ---------- */
 void *dm_nn_impl_lookup(const char *name);
 unsigned dm_nn_impl_count(void);

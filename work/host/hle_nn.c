@@ -19,6 +19,7 @@
  */
 #include "hle.h"
 #include "hle_nn.h"
+#include "hle_nn_more.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -303,6 +304,14 @@ static const dm_nn_ent g_nn_syms[] = {
     { "_ZN2nn2ro18RegisterModuleInfoEPNS0_16RegistrationInfoEPKv", (void *)dm_nn_ro_RegisterModuleInfo },
     { "_ZN2nn2ro12ProtectRelroEPKvS2_S2_S2_S2_",         (void *)dm_nn_ro_ProtectRelro },
     { "_ZN2nn2ro13GetBufferSizeEPmPKv",                  (void *)dm_nn_ro_GetBufferSize },
+    /* 服务层初始化（强制接管；依据 D2R Mobile dm/host/hle_sdkinit.c）
+       —— nninitInitializeSdkModule 调的这批会去连 Horizon 服务进程，宿主没有，一律空操作 */
+    { "_ZN2nn2fs24InitializeForApplicationEv",           (void *)dm_nn_fs_InitializeForApplication },
+    { "_ZN2nn4diag34InitializeApplicationAbortObserverEv", (void *)dm_nn_diag_AbortObserver },
+    { "_ZN2nn3err26InitializeContextWriterApiEv",        (void *)dm_nn_err_InitCtx },
+    { "_ZN2nn3aoc10InitializeEv",                        (void *)dm_nn_aoc_Initialize },
+    { "_ZN2nn4pctl10InitializeEv",                       (void *)dm_nn_pctl_Initialize },
+    { "nndiagStartup",                                   (void *)dm_nn_nndiagStartup },
 };
 
 void *dm_nn_force_lookup(const char *name) {

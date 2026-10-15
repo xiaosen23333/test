@@ -543,9 +543,36 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
      * 于是那些字段一直是偏移量 → 客体那份 ProtectRelro 拿偏移当指针 → 0xb85028 段错误。
      * 宿主这份 `dm_nn_ro_ProtectRelro` 是空实现（RELRO 在我们这里不需要保护），正好合适。
      * 目前只对 `_ZN2nn2ro` 前缀这么做：范围明确，不动 os/fs 等（那些宿主实现是另一套考虑）。 */
-    if (name && !strncmp(name, "_ZN2nn2ro", 9)) {
-        void *h = dm_nn_force_lookup(name);
-        if (h) return h;
+    /* !! 服务层初始化的强制接管（第 62 轮加）!!
+     * 依据 D2R Mobile 真机源码（dm/host/hle.h 的 HLE_FORCE / dm/host/hle_sdkinit.c，MIT）：
+     * 「即使 SDK 模块里有定义，装载时所有对该符号的引用一律解析到宿主实现。」
+     * nninitInitializeSdkModule 会调下面这批「连 Horizon 系统服务（IPC）」的初始化，
+     * iOS 上没有那些服务进程；SDK 里那份会拿 nn::sf::hipc 服务描述表去
+     * ConnectToHipcService，表没填就是裸偏移 → SIGSEGV（第 61 轮 .ips 实证）。
+     * 所以不建会话、直接返回；后续各服务接口在用到时再逐个接管。 */
+    if (name) {
+        static const char *force_names[] = {
+            "_ZN2nn2fs24InitializeForApplicationEv",
+            "_ZN2nn4diag34InitializeApplicationAbortObserverEv",
+            "_ZN2nn3err26InitializeContextWriterApiEv",
+            "_ZN2nn3aoc10InitializeEv",
+            "_ZN2nn4pctl10InitializeEv",
+            "_ZN2nn2oe10InitializeEv",
+            "nndiagStartup",
+        };
+        int force = !strncmp(name, "_ZN2nn2ro", 9);
+        if (!force) {
+            for (size_t k = 0; k < sizeof force_names / sizeof force_names[0]; k++)
+                if (!strcmp(name, force_names[k])) { force = 1; break; }
+        }
+        if (force) {
+            if (!strcmp(name, "nndiagStartup")) {
+                extern void dm_nn_nndiagStartup(void);
+                return (void *)dm_nn_nndiagStartup;
+            }
+            void *h = dm_nn_force_lookup(name);
+            if (h) return h;
+        }
     }
     /* 与 loader.c 的 module_sym_linear 语义一致：首个「已定义且有名字」的同名符号 */
     for (unsigned i = 0; i < nmods; i++) {

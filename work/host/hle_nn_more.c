@@ -16,6 +16,7 @@
  *   error: call to undeclared function 'dm_nn_InitializeSystemEvent'
  * 顺带好处：这样本文件的定义会与头文件声明逐一对照，签名写错当场就能发现。 */
 #include "hle_nn_more.h"
+#include "hle_diag.h"      /* dm_diag_mark：服务层接管的诊断打点 */
 
 #include <stdio.h>
 #include <string.h>
@@ -163,6 +164,20 @@ void dm_nn_hid_GetSixAxisSensorState(void *out, const void *h) {
 static void *g_oe_events[4] = { 0, 0, 0, 0 };   /* 分辨率变化事件（宿主自建） */
 
 void dm_nn_oe_Initialize(void) { }
+
+/* ================= 服务层初始化（强制接管，一律空操作） =================
+ * 依据：D2R Mobile 真机源码 dm/host/hle_sdkinit.c（MIT，work/ref/d2rm-src）。
+ * nninitInitializeSdkModule 会依次调下面这几个「连 Horizon 系统服务（IPC）」的
+ * 初始化函数。iOS 上没有 sm: 之外的那些服务进程，真机连不上；而 SDK 里那份实现
+ * 会用 nn::sf::hipc 的服务描述表去 ConnectToHipcService —— 那张表的名字指针由
+ * 全局构造填，没填就是裸偏移（第 61 轮 .ips 实证：strlen(0x8ffad7) SIGSEGV）。
+ * 所以照 D2R：**不建会话，直接返回**；各服务的后续接口在用到时再逐个接管。 */
+void dm_nn_fs_InitializeForApplication(void) { dm_diag_mark("init 接管：fs::InitializeForApplication（空操作）"); }
+void dm_nn_diag_AbortObserver(void)          { dm_diag_mark("init 接管：diag::InitializeApplicationAbortObserver（空操作）"); }
+void dm_nn_err_InitCtx(void)                 { dm_diag_mark("init 接管：err::InitializeContextWriterApi（空操作）"); }
+void dm_nn_aoc_Initialize(void)              { dm_diag_mark("init 接管：aoc::Initialize（空操作）"); }
+void dm_nn_pctl_Initialize(void)             { dm_diag_mark("init 接管：pctl::Initialize（空操作）"); }
+void dm_nn_nndiagStartup(void)               { dm_diag_mark("init 接管：nndiagStartup（空操作）"); }
 
 /* int nn::oe::GetOperationMode() —— 0 = Handheld, 1 = Console(Docked) */
 int dm_nn_oe_GetOperationMode(void) { return 0; }   /* iPad 当作掌机 */
