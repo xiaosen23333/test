@@ -20,6 +20,13 @@
  * （这是第 46 轮在 CI 上炸出来的 —— 本机没有 ObjC 编译器，看不到。
  *   它是特性测试宏，位置晚于第一个系统头就不生效，所以只能放在最前面。） */
 #define _XOPEN_SOURCE 600
+/* !! 还要开 _DARWIN_C_SOURCE !! 
+ * 只定义 _XOPEN_SOURCE 会把 Darwin 的**扩展**一并藏起来，于是：
+ *     error: call to undeclared function 'pthread_mach_thread_np'
+ *     error: use of undeclared identifier 'Dl_info' / 'dladdr'
+ * （看门狗采样主线程 PC、判断 PC 是否落在宿主里都要用这两个。）
+ * 两个宏一起定义才是「POSIX 接口 + Darwin 扩展」都能用。 */
+#define _DARWIN_C_SOURCE 1
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -359,7 +366,8 @@ static void dm_install_crash_handlers(void) {
  *     · PC 落在客体模块里 → 给出「sdk+0x…」这种偏移，直接反汇编就知道卡在哪条指令
  *     · PC 落在宿主里     → dladdr 能给出宿主函数名（例如卡在某个 HLE 实现里）
  *   并且会隔一段时间**再采一次**：PC 在变 = 在自旋；PC 不变且在一条系统调用指令上 = 在等。 */
-static volatile uint64_t g_heartbeat = 0;      /* frame_tick 每帧 +1（声明见上） */
+/* 注意：g_heartbeat 的**声明**在文件上面的全局区（frame_tick 之前）——
+   变量没有前向声明，声明晚于使用就是硬错误；这里不要再声明一次（会 redefinition）。 */
 static int               g_watchdog_started = 0;
 static mach_port_t       g_main_port = MACH_PORT_NULL;   /* 主线程的 mach port */
 
