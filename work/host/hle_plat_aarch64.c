@@ -16,6 +16,7 @@
  */
 #include "hle.h"
 #include "loader.h"
+#include "hle_diag.h"   /* dm_diag_mark：把「装槽结果」写进日志（iOS 上 stdout 没有去处） */
 /* 同上：没有 hle_nvn_boot.h，直接声明用到的接口 */
 extern void  *dm_host_current(void);
 
@@ -128,10 +129,17 @@ void dm_plat_tls_install(void) {
 
     if (!b->installed) {
         b->installed = 1;
-        printf("[dm] 线程槽已装好：键号 K18=%u KTLS=%u KTLR=%u KGATE=%u；"
-               "TLS 块=%p（TP=%p） TLR=%p（TP=%p） 门=%p\n",
-               k18, ktls, ktlr, kgate, (void *)b->tls, tp_tls, (void *)b->tlr, tp_tlr,
-               (void *)dm_gate);
+        /* 走诊断通道（写日志 + 下次启动会显示在屏幕上），不用 printf ——
+         * iOS 上 stdout 没有去处，屏幕上看到的只有 dm_diag 写进日志的那些行。
+         * 这几个键号很关键：方案依赖「值就存在 tpidrro_el0 + 8×键号」，键号必须是
+         * 小索引（Darwin 的直通槽），真机日志里能看到实际值。 */
+        char line[256];
+        snprintf(line, sizeof line,
+                 "线程槽已装好：键号 K18=%u KTLS=%u KTLR=%u KGATE=%u；"
+                 "TLS 块=%p TP=%p；TLR=%p TP=%p；门=%p",
+                 k18, ktls, ktlr, kgate, (void *)b->tls, tp_tls,
+                 (void *)b->tlr, tp_tlr, (void *)dm_gate);
+        dm_diag_mark("%s", line);
     }
 }
 
