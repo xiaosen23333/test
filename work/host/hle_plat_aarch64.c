@@ -108,6 +108,29 @@ static dm_thread_tls *tls_block_this_thread(void) {
     return b;
 }
 
+/* ---- 主线程登记（第 54 轮加）---------------------------------------------
+ *
+ * SDK 的 nn::os::detail 用这条路径取「当前线程」：
+ *     mrs  x8, tpidrro_el0        ← 被改写器换成"读 KTLR 槽"（我们给的 TLR 指针）
+ *     ldr  x8, [x8, #0x1F8]       ← TLS+0x1F8 = 当前线程的 ThreadType*
+ *     ldr  w8, [x8, #0x1B0]       ← ThreadType+0x1B0 = 线程 ID
+ * 真机上这两个字段由内核/rtld 在创建线程时填好；宿主不跑它们，**必须自己填**，
+ * 否则 SDK 第一次进临界区就会读到 0 → 崩在 0x1B0（第 53 轮实测：
+ * `nn::os::detail::InternalCriticalSectionImplByHorizon::Leave` / `IsLockedByCurrentThread`）。
+ * 创建的客体线程由 SDK 自己登记；主线程只能由宿主登记。 */
+static void *g_current_thread_type = NULL;
+
+void dm_plat_set_current_thread(void *thread_type) {
+    g_current_thread_type = thread_type;
+    if (thread_type) *(uint32_t *)((char *)thread_type + 0x1B0) = 1;  /* 线程 ID（自洽即可） */
+    dm_diag_mark("主线程登记：ThreadType=%p（TLS+0x1F8 已写）", thread_type);
+}
+
+/* 把当前线程指针写进 TLR 的 +0x1F8（装槽时调用） */
+static void install_current_thread(void *tlr_tp) {
+    if (tlr_tp) *(void **)((char *)tlr_tp + 0x1F8) = g_current_thread_type;
+}
+
 /* 给**当前线程**装好 4 个槽。幂等。必须在客体代码用到它们之前调用 ——
    也就是在 dm_guest_enter 之前（见 hle_nvn_guest.c）。
    宿主自己再建客体线程时（nn::os::CreateThread）也要在该线程里调一次。 */
@@ -120,6 +143,9 @@ void dm_plat_tls_install(void) {
 
     void *tp_tls = b->tls + DM_TP_BIAS;
     void *tp_tlr = b->tlr + DM_TP_BIAS;
+
+    /* SDK 从这里找「当前线程」（见上面的说明）—— 必须在客体跑起来之前写好 */
+    install_current_thread(tp_tlr);
 
     pthread_setspecific((pthread_key_t)k18,   tp_tls);
     pthread_setspecific((pthread_key_t)ktls,  tp_tls);

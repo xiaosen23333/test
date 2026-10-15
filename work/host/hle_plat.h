@@ -17,6 +17,12 @@
  * 宿主自己再建客体线程时（nn::os::CreateThread 那条路）也要在该线程里调一次。 */
 void dm_plat_tls_install(void);
 
+/* 登记「当前线程」的 ThreadType（主线程用；第 54 轮加）。
+ * SDK 从 `tpidrro_el0 + 0x1F8` 取当前线程、再读它的 +0x1B0（线程 ID）——
+ * 真机上这由内核/rtld 填，宿主必须自己填，否则 SDK 一进临界区就崩在 0x1B0。
+ * **必须在 dm_plat_tls_install() 之前调用**（装槽时会把这个指针写进 TLR）。 */
+void dm_plat_set_current_thread(void *thread_type);
+
 /* 装过几次（诊断：正常进客体前应为 1） */
 int  dm_plat_tls_install_count(void);
 

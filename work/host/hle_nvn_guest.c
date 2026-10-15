@@ -230,6 +230,8 @@ void dm_host_enter_guest(void) {
      * 门调用（svc、读 cntpct）也走槽取门地址。槽里本来是空的 → 客体一用就拿到
      * NULL → 第一次访存即 SIGSEGV（实测闪退在启动序列第 1 步）。
      * 这一步在所有真机路径上都是**第一个**要做的。 */
+    /* 先登记「当前线程」，再装槽（装槽时会把它写进 TLR+0x1F8 —— SDK 从那里取当前线程） */
+    dm_plat_set_current_thread(g_main_thread_type);
     dm_plat_tls_install();
     dm_diag_mark("线程槽已装好（装过 %d 次）", dm_plat_tls_install_count());
 
