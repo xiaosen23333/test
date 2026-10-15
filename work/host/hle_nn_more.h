@@ -47,7 +47,11 @@ void dm_nn_TimedWaitSystemEvent(void *e, int64_t ns);
 int  dm_nn_TimedWaitSystemEvent_rc(void *e, int64_t ns);
 
 /* ---------- nn::time ---------- */
-void  dm_nn_time_Initialize(void);
+void    dm_nn_time_Initialize(void);
+/* 第 65 轮照 D2R hle_time.c：让 SDK 的 nn::time 永远不连 time:u 服务 */
+int     dm_nn_time_IsInitialized(void);
+int64_t dm_nn_time_now(void);
+int64_t dm_nn_time_to_time_t(const int64_t *tp);
 void  dm_nn_time_GetCurrentTime(void *out);
 void *dm_nn_time_ToCalendarTime(void *out_cal, void *out_add, const void *posix);
 

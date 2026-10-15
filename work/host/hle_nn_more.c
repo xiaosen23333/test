@@ -206,6 +206,19 @@ void dm_nn_oe_GetDefaultDisplayResolutionChangeEvent(void *ev) {
 
 void dm_nn_time_Initialize(void) { }
 
+/* 第 65 轮：下面三个照 D2R Mobile 的 hle_time.c 接管。
+ * 为什么必须接管：SDK 的 nn::time 客户端内部会去 sm: 要 "time:u" 服务会话
+ * （真机日志实证：diag::AbortObserver 之后立刻 ConnectToNamedPort("sm:")、
+ *   SendSyncRequest 里带着 "time:u"，随后 [Break] reason=0 致命中止）。
+ * 宿主没有 Horizon 服务进程，假 IPC 只回成功 → SDK 拿到空会话 → 走错误路径。
+ * D2R 的做法是**根本不让它连**：整族强制接管成宿主实现（dm/host/hle_time.c）。
+ *   IsInitialized → 恒 1（已初始化）
+ *   now()          → 宿主 time()（秒）
+ *   to_time_t(tp) → *tp（与 now() 配套，TimePoint 就是秒数） */
+int dm_nn_time_IsInitialized(void) { return 1; }
+int64_t dm_nn_time_now(void) { return (int64_t)time(NULL); }
+int64_t dm_nn_time_to_time_t(const int64_t *tp) { return tp ? *tp : 0; }
+
 /* nn::time::StandardUserSystemClock::GetCurrentTime(PosixTime *out)
    PosixTime 是 int64 秒 + int32 纳秒（共 16 字节，按 8 字节对齐）。 */
 void dm_nn_time_GetCurrentTime(void *out) {

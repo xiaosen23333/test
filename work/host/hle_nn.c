@@ -312,6 +312,14 @@ static const dm_nn_ent g_nn_syms[] = {
     { "_ZN2nn3aoc10InitializeEv",                        (void *)dm_nn_aoc_Initialize },
     { "_ZN2nn4pctl10InitializeEv",                       (void *)dm_nn_pctl_Initialize },
     { "nndiagStartup",                                   (void *)dm_nn_nndiagStartup },
+    /* nn::time 整族强制接管（第 65 轮；照 D2R dm/host/hle_time.c）：
+       SDK 的 time 客户端会去 sm: 要 "time:u"，宿主没有该服务进程 → 空会话 →
+       [Break] reason=0 致命中止。接管后它永远走不到那一步。 */
+    { "_ZN2nn4time10InitializeEv",                       (void *)dm_nn_time_Initialize },
+    { "_ZN2nn4time13IsInitializedEv",                    (void *)dm_nn_time_IsInitialized },
+    { "_ZN2nn4time23StandardUserSystemClock3nowEv",      (void *)dm_nn_time_now },
+    { "_ZN2nn4time23StandardUserSystemClock9to_time_tERKNSt3__16chrono10time_pointINS0_17SystemClockTraitsENS3_8durationIlNS2_5ratioILl1ELl1EEEEEEE",
+                                                         (void *)dm_nn_time_to_time_t },
 };
 
 void *dm_nn_force_lookup(const char *name) {
