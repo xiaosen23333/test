@@ -66,6 +66,56 @@ function Import-MsvcEnv {
 $msvcOk = Import-MsvcEnv
 if ($msvcOk) { Write-Host "  [OK] MSVC 开发者环境已注入" -ForegroundColor Green }
 
+# --- 3b. 兜底：直接按标准路径填 INCLUDE/LIB ---
+# 为什么要这个：vcvars64.bat 内部会去查注册表，而某些受限/沙箱环境下 reg.exe 被拦，
+# 结果是**它看起来跑过了、但 INCLUDE/LIB 根本没设** —— 症状是每个源文件都报
+#     fatal error C1083: cannot open include file: 'stddef.h'
+# 更坏的是 build_all.ps1 原来只看「exe 在不在」，于是**旧 exe 被当成编译成功**，
+# 17 项自测全部"通过" —— 一个假的绿灯（第 46 轮真踩到）。
+function Import-MsvcEnvManual {
+    $roots = @(
+      'C:\Program Files\Microsoft Visual Studio\2022\Community',
+      'C:\Program Files\Microsoft Visual Studio\2022\Professional',
+      'C:\Program Files\Microsoft Visual Studio\2022\Enterprise',
+      'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community'
+    )
+    $vs = $roots | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $vs) { return $false }
+    $msvcRoot = Join-Path $vs 'VC\Tools\MSVC'
+    if (-not (Test-Path $msvcRoot)) { return $false }
+    $verDir = Get-ChildItem $msvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $verDir) { return $false }
+    $inc = Join-Path $verDir.FullName 'include'
+    $lib = Join-Path $verDir.FullName 'lib\x64'
+    $bin = Join-Path $verDir.FullName 'bin\Hostx64\x64'
+
+    $sdkIncRoot = 'C:\Program Files (x86)\Windows Kits\10\Include'
+    $sdkLibRoot = 'C:\Program Files (x86)\Windows Kits\10\Lib'
+    $sdkVer = $null
+    if (Test-Path $sdkIncRoot) {
+        $sdkVer = (Get-ChildItem $sdkIncRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
+    }
+    if (-not $sdkVer) { return $false }
+
+    $env:INCLUDE = "$inc;$sdkIncRoot\$sdkVer\ucrt;$sdkIncRoot\$sdkVer\um;$sdkIncRoot\$sdkVer\shared"
+    $env:LIB     = "$lib;$sdkLibRoot\$sdkVer\ucrt\x64;$sdkLibRoot\$sdkVer\um\x64"
+    Add-PathEntry $bin
+    Write-Host ("  [兜底] 直接填了 INCLUDE/LIB（MSVC {0} + SDK {1}）" -f $verDir.Name, $sdkVer) -ForegroundColor Yellow
+    return $true
+}
+
+if (-not $env:INCLUDE -or -not $env:LIB) {
+    $null = Import-MsvcEnvManual
+} else {
+    # 即使 vcvars 报成功，也确认 SDK 的 ucrt 在 INCLUDE 里（少了它就找不到 stddef.h）
+    if ($env:INCLUDE -notmatch 'ucrt') { $null = Import-MsvcEnvManual }
+}
+if ($env:INCLUDE -and $env:LIB) {
+    Write-Host ("  [OK] INCLUDE 共 {0} 段、LIB 共 {1} 段" -f ($env:INCLUDE -split ';').Count, ($env:LIB -split ';').Count) -ForegroundColor Green
+} else {
+    Write-Host "  !! INCLUDE/LIB 仍未设好 —— 编译会报 C1083（stddef.h 找不到）" -ForegroundColor Red
+}
+
 # --- 4. 仓库工具认的环境变量 ---
 if (-not $env:DM_ROOT) { $env:DM_ROOT = Join-Path $RepoRoot 'work\dm-work' }
 # 中文 Windows 控制台默认 GBK，Python 打中文会乱码或抛编码异常

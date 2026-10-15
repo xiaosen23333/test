@@ -27,6 +27,7 @@
 #include "loader.h"
 #include "hle_nn.h"
 #include "hle_diag.h"      /* 诊断通道：五步各打一个标记（真机上这是唯一能看到的东西） */
+#include "hle_plat.h"      /* dm_plat_tls_install：进客体前必须先把 4 个线程槽装好 */
 /* 注意：没有 hle_nvn_boot.h —— 启动逻辑在 hle_nvn_boot.c 里，
    它的接口只有三个函数，直接在这里声明（我第一版 #include 了一个不存在的头，
    编译报 C1083）。理想做法是把它们提到一个头文件共用。 */
@@ -168,6 +169,14 @@ void dm_host_enter_guest(void) {
     /* 客体栈顶：栈向下生长，所以给的是**高地址端**，并保持 16 字节对齐
        （AAPCS64 要求 SP 在函数入口 16 字节对齐） */
     void *stack_top = (void *)(g_guest_stack + DM_GUEST_STACK_SIZE);
+
+    /* !! 第 46 轮：进客体之前**必须**先把线程槽装好 !!
+     * 客体的 x18 / tpidr_el0 / tpidrro_el0 已被改写器换成「读宿主线程槽」，
+     * 门调用（svc、读 cntpct）也走槽取门地址。槽里本来是空的 → 客体一用就拿到
+     * NULL → 第一次访存即 SIGSEGV（实测闪退在启动序列第 1 步）。
+     * 这一步在所有真机路径上都是**第一个**要做的。 */
+    dm_plat_tls_install();
+    dm_diag_mark("线程槽已装好（装过 %d 次）", dm_plat_tls_install_count());
 
     dm_diag_mark("切栈进客体（栈 %u KB）", DM_GUEST_STACK_SIZE / 1024);
     dm_guest_enter((void *)guest_main, NULL, stack_top);

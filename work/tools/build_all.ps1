@@ -63,15 +63,29 @@ foreach ($t in $TESTS) {
         $failed += $name; continue
     }
     $log = Join-Path $B "$name.build.log"
+    $exe = Join-Path $B "$name.exe"
+
+    # !! 先删掉旧 exe !!
+    # 第 46 轮踩到的坑：编译器失败时不会删掉之前那次成功的 exe，
+    # 而下面只用「exe 在不在」判断编译成功 —— 于是**旧二进制被当成编译成功**，
+    # 17 项自测全绿，是个假绿灯（真因是 vcvars 没把 INCLUDE 设上，见 dm_env.ps1）。
+    # 删掉它 + 额外查编译日志里的 error，两个保险一起上。
+    Remove-Item $exe -Force -ErrorAction SilentlyContinue
+
     $clArgs = @('/nologo','/W3','/utf-8','/D_CRT_SECURE_NO_WARNINGS') + $SRC + @($cs, "/Fe:$name.exe")
     & cl @clArgs *> $log
-    if (-not (Test-Path (Join-Path $B "$name.exe"))) {
+    if (-not (Test-Path $exe)) {
         Write-Host ("  {0,-24} 编译失败（见 {1}）" -f $name, $log) -ForegroundColor Red
+        $failed += $name; continue
+    }
+    $cerr = Select-String -Path $log -Pattern 'error C\d+|fatal error|error LNK' -ErrorAction SilentlyContinue
+    if ($cerr) {
+        Write-Host ("  {0,-24} 编译有报错（见 {1}）" -f $name, $log) -ForegroundColor Red
         $failed += $name; continue
     }
     $built++
     $rlog = Join-Path $B "$name.run.log"
-    & (Join-Path $B "$name.exe") @($t.a) *> $rlog
+    & $exe @($t.a) *> $rlog
     $rc = $LASTEXITCODE
     $line = Select-String -Path $rlog -Pattern 'result:' | Select-Object -Last 1
     $verdict = if ($line) { ($line.Line -replace '.*result:\s*','').Trim() } else { "(无结论行)" }

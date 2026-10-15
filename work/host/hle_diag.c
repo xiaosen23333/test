@@ -15,13 +15,19 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdint.h>     /* uintptr_t —— 模块表用 */
 #include <string.h>
 #include <stdlib.h>
+
+#if defined(__unix__) || defined(__APPLE__)
+  #include <unistd.h>          /* write —— 崩溃处理里唯一敢用的输出方式 */
+#endif
 
 #define DM_DIAG_MAX_BYTES   (256 * 1024)   /* 超过它就只留尾部 */
 #define DM_DIAG_KEEP_BYTES  (64  * 1024)   /* 留多少 */
 
 static FILE *g_log = NULL;
+static int   g_logfd = -1;      /* 与 g_log 同一个文件；崩溃时用它直写 */
 
 /* 三段长期保存的文字 */
 static char g_boot[192]  = "（还没装载）";
@@ -67,11 +73,14 @@ static void shrink_if_big(const char *path) {
 }
 
 void dm_diag_set_log(const char *path) {
-    if (g_log) { fclose(g_log); g_log = NULL; }
+    if (g_log) { fclose(g_log); g_log = NULL; g_logfd = -1; }
     if (!path || !path[0]) return;
     shrink_if_big(path);
     g_log = fopen(path, "a");
+    if (g_log) g_logfd = fileno(g_log);
 }
+
+int dm_diag_log_fd(void) { return g_logfd; }
 
 static void emit(const char *line) {
     if (!g_log) return;
@@ -142,4 +151,103 @@ int dm_host_diag(char *buf, int n) {
                     (unsigned long long)dm_mtl_stat_passes(),
                     (unsigned long long)dm_mtl_stat_draws(),
                     (unsigned long long)dm_mtl_stat_presents());
+}
+
+/* ------------------------------------------------------------------ */
+/* 崩溃诊断                                                            */
+/* ------------------------------------------------------------------ */
+/* 这一段**不用 stdio、不分配内存**：信号处理里只有 write(2) 之类的少数调用是安全的，
+ * snprintf/malloc 都可能踩到锁或分配器而二次崩溃（那就什么痕迹都留不下了）。
+ * 所以这里手写 hex/dec 格式化，字符串拼好后一次 write。 */
+
+typedef struct { char *p; int n; int cap; } sb_t;
+
+static void sb_c(sb_t *b, char c)            { if (b->n < b->cap - 1) b->p[b->n++] = c; }
+static void sb_s(sb_t *b, const char *s)     { while (*s) sb_c(b, *s++); }
+static void sb_hex(sb_t *b, unsigned long long v) {
+    char t[17]; int k = 0;
+    if (!v) t[k++] = '0';
+    while (v) { unsigned d = (unsigned)(v & 0xF); t[k++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); v >>= 4; }
+    sb_s(b, "0x");
+    while (k) sb_c(b, t[--k]);
+}
+static void sb_dec(sb_t *b, unsigned long long v) {
+    char t[24]; int k = 0;
+    if (!v) t[k++] = '0';
+    while (v) { t[k++] = (char)('0' + (v % 10)); v /= 10; }
+    while (k) sb_c(b, t[--k]);
+}
+
+/* 模块表：装载时登记，崩溃时用来把 PC 翻成「模块 + 偏移」 */
+#define DM_DIAG_MAX_MODS 8
+typedef struct { char name[24]; unsigned long long base, size; } dm_diag_mod;
+static dm_diag_mod g_mods[DM_DIAG_MAX_MODS];
+static int          g_nmods = 0;
+
+void dm_diag_set_module(const char *name, const void *base, unsigned long long size) {
+    if (g_nmods >= DM_DIAG_MAX_MODS) return;
+    dm_diag_mod *m = &g_mods[g_nmods++];
+    int i = 0;
+    for (; name && name[i] && i < (int)sizeof m->name - 1; i++) m->name[i] = name[i];
+    m->name[i] = 0;
+    m->base = (unsigned long long)(uintptr_t)base;
+    m->size = size;
+}
+
+int dm_diag_addr(unsigned long long addr, char *out, int n) {
+    for (int i = 0; i < g_nmods; i++) {
+        unsigned long long b = g_mods[i].base;
+        if (addr >= b && addr < b + g_mods[i].size) {
+            int k = 0;
+            for (const char *p = g_mods[i].name; *p && k < n - 1; p++) out[k++] = *p;
+            if (k < n - 1) out[k++] = '+';
+            char h[20]; int hk = 0;
+            unsigned long long v = addr - b;
+            if (!v) h[hk++] = '0';
+            while (v) { unsigned d = (unsigned)(v & 0xF); h[hk++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); v >>= 4; }
+            if (k < n - 1) out[k++] = '0';
+            if (k < n - 1) out[k++] = 'x';
+            while (hk && k < n - 1) out[k++] = h[--hk];
+            out[k] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void dm_diag_crash_line(int sig, unsigned long long fault_addr,
+                        unsigned long long pc, unsigned long long lr,
+                        unsigned long long sp, const unsigned long long *x, int nx) {
+    char buf[640];
+    sb_t b = { buf, 0, (int)sizeof buf };
+    char nm[40];
+
+    sb_s(&b, "\n[崩溃] 信号 "); sb_dec(&b, (unsigned)sig);
+    sb_s(&b, "  故障地址 ");    sb_hex(&b, fault_addr);
+    sb_s(&b, "\n[崩溃] PC ");   sb_hex(&b, pc);
+    if (dm_diag_addr(pc, nm, (int)sizeof nm)) { sb_s(&b, " ("); sb_s(&b, nm); sb_s(&b, ")"); }
+    sb_s(&b, "  LR ");          sb_hex(&b, lr);
+    if (dm_diag_addr(lr, nm, (int)sizeof nm)) { sb_s(&b, " ("); sb_s(&b, nm); sb_s(&b, ")"); }
+    sb_s(&b, "  SP ");          sb_hex(&b, sp);
+
+    if (x && nx > 0) {
+        sb_s(&b, "\n[崩溃] 参数");
+        for (int i = 0; i < nx; i++) { sb_s(&b, " x"); sb_dec(&b, (unsigned)i); sb_s(&b, "="); sb_hex(&b, x[i]); }
+    }
+    sb_s(&b, "\n[崩溃] 最后阶段: "); sb_s(&b, g_stage);
+    sb_s(&b, "\n");
+    sb_c(&b, 0);
+
+    /* 只有 write(2) —— 崩溃路径上唯一可靠的方式 */
+#if defined(__unix__) || defined(__APPLE__)
+    if (g_logfd >= 0) {
+        ssize_t w = write(g_logfd, buf, (size_t)b.n - 1);
+        (void)w;
+    }
+#else
+    if (g_logfd >= 0) {
+        /* Windows 上不会走这条路（没有真机崩溃），留个能编译的实现 */
+        if (g_log) { fputs(buf, g_log); fflush(g_log); }
+    }
+#endif
 }

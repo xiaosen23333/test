@@ -49,6 +49,96 @@ unsigned dm_thread_key(int which) {
     return (unsigned)g_keys[which];
 }
 
+/* ---------------- ①b 往线程槽里填值（第 46 轮补 —— 这是闪退的直接原因） ----------
+ *
+ * !! 为什么必须有这一段 !!
+ * 改写器把客体的三种线程相关访问都改成「读槽」：
+ *      mrs x18, tpidrro_el0        →  x18 = *(宿主tpidrro_el0 + 键号K18×8)
+ *      mrs/msr tpidr_el0           →  ...      键号KTLS×8
+ *      mrs tpidrro_el0             →  ...      键号KTLR×8
+ * 也就是说：**槽里必须放指针**，而且宿主必须把它们填上。
+ * 而全仓库**从来没有人填过**（只有 hle_nn_thread.c 里给 nn::os 线程簿记用的
+ * tls_set，用的是另一批键）。于是客体第一次用 x18/tpidr_el0 就拿到 NULL：
+ *      ldr w0, [NULL, #8]  →  SIGSEGV  →  闪退（实测：卡在启动序列第 1 步）
+ *
+ * 三个槽该放什么（依据见 work/porting/tls_probe.py 在**解压映像**上量出的偏移范围）：
+ *   K18 / KTLS → musl 的线程指针（TLS 基址）。**两者必须是同一个值** ——
+ *                量出来 main 里有 1259 处 `mrs tpidr_el0`、146 处 x18 相对访存，
+ *                偏移范围 x18 −96..+2488 / tpidr_el0 −8..+2352，就是同一块 TLS。
+ *                负偏移是 AArch64 的 TCB（在 TP 下方），所以 TP 不能放在块首 ——
+ *                这里给块首留 0x100 给 TCB，TP = 块首 + 0x100。
+ *   KTLR      → Horizon 的 ThreadLocalRegion（sdk 里 124 处 mrs tpidrro_el0，
+ *                相对偏移 +8..+496，量到最大 +4080）。同样给 TP 留 0x100。
+ *   KGATE     → **&_dm_gate**（entry.S 的门入口）。不填的话，客体第一次
+ *                svc / cntpct 读就是 `blr NULL` —— 第二次闪退点。
+ *
+ * 大小取值：TLS 块 0x8000、ThreadLocalRegion 0x2000。
+ * 依据：NmplDLL 的 62 个 TLSDESC 里，TLS 偏移最大 14296（≈0x37D8），
+ * 全模块 x18 相对访存最大 +14336（0x3800）→ 0x8000 足够且留了余量。 */
+#define DM_TLS_BLOCK   (0x100 + 0x8000)     /* 前面 0x100 是 TCB 区 */
+#define DM_TLR_BLOCK   (0x100 + 0x2000)     /* 前面 0x100 留余量 */
+#define DM_TP_BIAS     0x100                /* TP 相对块首的偏移 */
+
+typedef struct {
+    unsigned char tls[DM_TLS_BLOCK];        /* musl TLS（K18 / KTLS 指向它） */
+    unsigned char tlr[DM_TLR_BLOCK];        /* ThreadLocalRegion（KTLR） */
+    int           installed;
+} dm_thread_tls;
+
+/* 本线程的块存哪儿：另用一个 pthread 键存指针（与那 4 个键不冲突） */
+static pthread_key_t g_block_key;
+static int           g_block_key_ready = 0;
+static int           g_tls_installs = 0;      /* 装过几次（诊断） */
+
+/* entry.S 的门入口（Mach-O 里叫 _dm_gate，C 侧名字就是 dm_gate） */
+extern void dm_gate(void);
+
+static dm_thread_tls *tls_block_this_thread(void) {
+    if (!g_block_key_ready) {
+        if (pthread_key_create(&g_block_key, NULL) != 0) return NULL;
+        g_block_key_ready = 1;
+    }
+    dm_thread_tls *b = (dm_thread_tls *)pthread_getspecific(g_block_key);
+    if (!b) {
+        b = (dm_thread_tls *)calloc(1, sizeof *b);   /* 全零 = 「新线程」的状态 */
+        if (!b) return NULL;
+        pthread_setspecific(g_block_key, b);
+    }
+    return b;
+}
+
+/* 给**当前线程**装好 4 个槽。幂等。必须在客体代码用到它们之前调用 ——
+   也就是在 dm_guest_enter 之前（见 hle_nvn_guest.c）。
+   宿主自己再建客体线程时（nn::os::CreateThread）也要在该线程里调一次。 */
+void dm_plat_tls_install(void) {
+    /* 先确保 4 个键已建好（dm_thread_key 会建） */
+    unsigned k18 = dm_thread_key(DM_KEY_K18), ktls = dm_thread_key(DM_KEY_KTLS),
+             ktlr = dm_thread_key(DM_KEY_KTLR), kgate = dm_thread_key(DM_KEY_KGATE);
+    dm_thread_tls *b = tls_block_this_thread();
+    if (!b) { fprintf(stderr, "[dm] TLS 块分配失败\n"); return; }
+
+    void *tp_tls = b->tls + DM_TP_BIAS;
+    void *tp_tlr = b->tlr + DM_TP_BIAS;
+
+    pthread_setspecific((pthread_key_t)k18,   tp_tls);
+    pthread_setspecific((pthread_key_t)ktls,  tp_tls);
+    pthread_setspecific((pthread_key_t)ktlr,  tp_tlr);
+    pthread_setspecific((pthread_key_t)kgate, (void *)dm_gate);
+    g_tls_installs++;
+
+    if (!b->installed) {
+        b->installed = 1;
+        printf("[dm] 线程槽已装好：键号 K18=%u KTLS=%u KTLR=%u KGATE=%u；"
+               "TLS 块=%p（TP=%p） TLR=%p（TP=%p） 门=%p\n",
+               k18, ktls, ktlr, kgate, (void *)b->tls, tp_tls, (void *)b->tlr, tp_tlr,
+               (void *)dm_gate);
+    }
+}
+
+/* 单调递增的「装过几次」计数（诊断用） */
+int dm_plat_tls_install_count(void) { return g_tls_installs; }
+
+
 /* ---------------- ② 客体线程从入口返回 ---------------- */
 /* Horizon 的线程必须经 nn::os::ExitThread 退出；入口函数返回就是 bug。
  * 这里如实报告（而不是静默把线程收掉）—— 静默会让「客体逻辑错」变成一个查不到的谜。 */

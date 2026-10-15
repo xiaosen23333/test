@@ -90,4 +90,10 @@ const char *dm_loader_err(int rc);
 /* 释放 dm_loader_map 分配的映像（必须用它，不能用 free —— 见 loader.c 的平台抽象） */
 void dm_loader_unmap(dm_module *m);
 
+/* TLSDESC 的 resolver（第 46 轮加；实现在 loader.c）。
+ * 装载器会把它写进每个 TLSDESC 描述符的 [0] 槽 —— 客体取 TLS 变量时**真的会 blr 它**
+ * （从解压模块反汇编确认过），所以这一格**不能是 0**，否则就是 `blr 0` 立刻崩。
+ * 入参 = 描述符地址；返回 desc[1]（已填好的 TLS 偏移）。 */
+uint64_t dm_tlsdesc_resolver(uint64_t *desc);
+
 #endif /* DM_LOADER_H */

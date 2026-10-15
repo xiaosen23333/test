@@ -19,8 +19,11 @@
 /* 下面用了 snprintf —— 显式包含，不要指望 UIKit 间接带进来 */
 #include <stdio.h>
 #include <stdarg.h>     /* va_list —— status_set 用它（第 43 轮加状态文字时引入） */
+#include <stdint.h>     /* uintptr_t —— 崩溃处理里把 si_addr 转成整数 */
 #include <stdlib.h>     /* malloc / free —— log_tail 读日志尾部时用（第 45 轮） */
 #include <string.h>
+#include <signal.h>     /* 崩溃捕获（第 46 轮） */
+#include <ucontext.h>   /* ucontext_t：从信号上下文里取 PC/LR/SP/寄存器 */
 
 #include "hle.h"
 #include "hle_nn.h"
@@ -273,9 +276,57 @@ static void status_set(NSString *fmt, ...) {
     refresh_status(s);
 }
 
+/* ------------------------------------------------------------------ */
+/* 崩溃捕获（让「闪退」也留下线索）                                    */
+/* ------------------------------------------------------------------ */
+/* 为什么需要（第 46 轮加）：
+ *   客体跑在**主线程**上。它一旦踩到坏指针，App 直接消失 —— 屏幕上的字跟着没了，
+ *   而那正是我们最需要的信息（"崩在哪条指令"）。
+ *   这里装一组信号处理：崩的时候只做一件事 —— 把故障地址 / PC / LR / SP / 参数
+ *   **写进日志文件**（走 dm_diag_crash_line，内部只用 write(2)）。
+ *   下次启动时屏幕会把日志尾部显示出来（见 log_tail），于是不用连电脑就能看到。
+ *   再配合 dm_diag_set_module 登记的各模块基址，PC 会被翻成「模块 + 偏移」，
+ *   拿这个偏移去反汇编就知道是哪一条指令炸的。
+ *
+ * 信号处理里**只能用 write 这一类**：snprintf/malloc 都可能踩到锁或分配器而二次崩溃
+ * （那就一点痕迹都留不下了）。所以格式化在 hle_diag.c 里手写、只 write 一次。 */
+static void dm_crash_handler(int sig, siginfo_t *info, void *uctx) {
+    unsigned long long pc = 0, lr = 0, sp = 0, xs[4] = { 0, 0, 0, 0 };
+    unsigned long long fault = info ? (unsigned long long)(uintptr_t)info->si_addr : 0;
+#if defined(__aarch64__)
+    ucontext_t *uc = (ucontext_t *)uctx;
+    if (uc) {
+        pc = (unsigned long long)uc->uc_mcontext->__ss.__pc;
+        lr = (unsigned long long)uc->uc_mcontext->__ss.__lr;
+        sp = (unsigned long long)uc->uc_mcontext->__ss.__sp;
+        for (int i = 0; i < 4; i++)
+            xs[i] = (unsigned long long)uc->uc_mcontext->__ss.__x[i];
+    }
+#else
+    (void)uctx;
+#endif
+    dm_diag_crash_line(sig, fault, pc, lr, sp, xs, 4);
+
+    /* 恢复默认处理再重发 —— 让系统照常生成崩溃报告，别把进程留在半死状态 */
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void dm_install_crash_handlers(void) {
+    static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGSYS,
+                                SIGFPE, SIGABRT, SIGTRAP };
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = dm_crash_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    for (unsigned i = 0; i < sizeof sigs / sizeof sigs[0]; i++)
+        sigaction(sigs[i], &sa, NULL);
+    dm_diag_mark("崩溃捕获已装好（%u 个信号）", (unsigned)(sizeof sigs / sizeof sigs[0]));
+}
+
 @interface DmVC : UIViewController
 @end
-
 @implementation DmVC
 
 - (void)viewDidLoad {
@@ -293,7 +344,7 @@ static void status_set(NSString *fmt, ...) {
      * 行数给足 8 行：本次状态 + 一行总览 + 「上次运行的最后几行」+ 日志尾部。
      * 字体用等宽 —— 数字对齐，帧计数与 NVN 计数好读。 */
     g_status = [[UILabel alloc] initWithFrame:CGRectMake(16, 30, self.view.bounds.size.width - 32, 200)];
-    g_status.numberOfLines = 8;
+    g_status.numberOfLines = 12;   /* 状态 + 总览 + 「上次运行」+ 最多 8 行日志尾部 */
     g_status.textColor = [UIColor whiteColor];
     g_status.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
     g_status.text = @"正在启动…";
@@ -302,7 +353,7 @@ static void status_set(NSString *fmt, ...) {
 
     /* 读**上次运行**日志的尾部（必须在本次开始写日志之前读，否则读到的是本次的）。
      * 这是崩溃后的主要线索来源：上次跑到哪一步、崩在哪 —— 开机就能看到。 */
-    g_prev_tail = log_tail(6);
+    g_prev_tail = log_tail(8);   /* 崩溃那块一次写 4~5 行，给足 8 行才不会截掉 */
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -347,6 +398,8 @@ UIWindow *dm_ios_make_window(void) {
        所以**日志要在这之后才打开**（先读旧的，再开始写新的）。 */
     dm_diag_set_log(dm_ios_log_path());
     dm_diag_mark("=== 本次启动（窗口已建）—— 日志 %s ===", dm_ios_log_path());
+    /* 崩溃捕获要在装载之前装好 —— 装载与进客体都可能崩 */
+    dm_install_crash_handlers();
     return w;
 }
 

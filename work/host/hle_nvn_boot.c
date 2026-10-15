@@ -170,7 +170,11 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
             dm_diag_mark("装载失败：第 %u 个模块 %s rc=%d", i, g_mod_names[i], rc);
             return -10 - (int)i;
         }
-        dm_diag_mark("已装载模块 %s", g_mod_names[i]);
+        dm_diag_mark("已装载模块 %s（base=%p size=%llu）", g_mod_names[i],
+                     (void *)m->base, (unsigned long long)m->size);
+        /* 登记给崩溃诊断：这样崩溃时能把 PC 翻成「模块 + 偏移」，
+           直接拿去反汇编就知道是哪条指令炸的（不用再猜） */
+        dm_diag_set_module(m->name, m->base, (unsigned long long)m->size);
         g_ctx.nmods++;
     }
     g_boot_info.nmods = g_ctx.nmods;

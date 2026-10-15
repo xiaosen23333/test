@@ -94,7 +94,42 @@ int main(int argc, char **argv) {
         else in_other++;
     }
     printf("    在 ro    : %u\n    在 data  : %u\n    其他     : %u\n", in_ro, in_data, in_other);
-    printf("\n=== result: %s ===\n", (nh > 0) ? "ALL PASS" : "NO TLSDESC FOUND");
 
-    return 0;
+    /* ------------------------------------------------------------------ */
+    /* !! 第 46 轮新增：真的跑一遍重定位，核对描述符被填对了 !!
+     *
+     * 为什么必须核对：上一版把 desc[0] 填成 0，注释还写「resolver 已不需要」。
+     * 而从解压模块反汇编可以看到客体**真的会 blr desc[0]**：
+     *     adrp x0, <描述符页> ; ldr x1,[x0,#lo12] ; add x0,x0,#lo12 ; blr x1
+     * 所以 desc[0]=0 就是 `blr 0` —— 一按就崩。这个自测如果只「数了 62 条」是发现不了的。 */
+    dm_load_stats st;
+    memset(&st, 0, sizeof st);
+    int rrc = dm_loader_relocate(m, ctx.mods, ctx.nmods, &st);
+    printf("\n=== 应用重定位后再看描述符（第 46 轮新增的核对）===\n");
+    printf("  relocate rc=%d，TLSDESC %llu 条，relative %llu，未解析 %llu\n",
+           rrc, (unsigned long long)st.n_tlsdesc,
+           (unsigned long long)st.n_relative, (unsigned long long)st.n_unresolved);
+
+    unsigned bad_resolver = 0, bad_offset = 0, checked = 0;
+    for (unsigned i = 0; i < nh && i < 64; i++) {
+        if (hits[i].off + 16 > m->size) continue;
+        uint64_t a = *(const uint64_t *)(m->base + hits[i].off);
+        uint64_t b = *(const uint64_t *)(m->base + hits[i].off + 8);
+        checked++;
+        if (a != (uint64_t)(uintptr_t)dm_tlsdesc_resolver) bad_resolver++;
+        /* 偏移：具名符号用 st_value，匿名用 addend —— 与 loader.c 的规则一致 */
+        uint64_t want = m->symtab[hits[i].si].st_value
+                        ? m->symtab[hits[i].si].st_value : (uint64_t)hits[i].add;
+        if (b != want) bad_offset++;
+    }
+    printf("  核对 %u 条：resolver 不对 %u 条、偏移不对 %u 条\n",
+           checked, bad_resolver, bad_offset);
+    printf("  resolver 地址 = %p（dm_tlsdesc_resolver）\n", (void *)(uintptr_t)dm_tlsdesc_resolver);
+    printf("  说明：resolver 不能是 0 —— 客体取 TLS 变量时会 blr 它（blr 0 = 立刻崩）。\n");
+    printf("        入参是**描述符地址**（不是 &desc[1]），所以实现是 `return desc[1]`。\n");
+
+    int ok = (nh > 0) && (bad_resolver == 0) && (bad_offset == 0) && (checked > 0);
+    printf("\n=== result: %s ===\n", ok ? "ALL PASS" : "FAIL");
+
+    return ok ? 0 : 1;
 }

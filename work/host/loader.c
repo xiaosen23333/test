@@ -23,6 +23,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ---------------- TLSDESC 的 resolver（第 46 轮加） ----------------
+ *
+ * AArch64 TLSDESC 的调用约定，从本游戏解压后的模块里反汇编确认：
+ *     adrp x0, <描述符页>
+ *     ldr  x1, [x0, #lo12]     ; x1 = desc[0] = 本函数
+ *     add  x0, x0, #lo12       ; x0 = &desc[0]  ← **入参是描述符地址**
+ *     blr  x1                  ; 出参 x0 = 要加到线程指针上的偏移
+ * 所以本函数只做一件事：把 desc[1]（装载器已经填好的 TLS 偏移）返回。
+ *
+ * 为什么参数是 `uint64_t *`（= 描述符首地址）而不是别的：见上面的 `add x0, x0, #lo12`——
+ * 传进来的是描述符本身的地址，不是 &desc[1]。按 &desc[1] 写会取到错误的字段。
+ *
+ * 平台注意：这是普通 C 函数，Apple 的 ABI 保留 x18，所以它不会破坏客体的线程指针；
+ * 客体取 TLS 的那些序列也不会跨调用保活 x18。
+ * 它会被**客体**在客体栈上调用（AAPCS64 与宿主一致），所以这里不需要任何平台差异。 */
+uint64_t dm_tlsdesc_resolver(uint64_t *desc) {
+    return desc ? desc[1] : 0;
+}
+
 /* ---------------- 平台抽象 ---------------- */
 
 #if defined(_WIN32)
@@ -229,27 +248,34 @@ int dm_loader_relocate(dm_module *m, const dm_module *mods, unsigned nmods,
             /* ---- TLSDESC（type 1031）：线程局部存储描述符 ----
              *
              * AArch64 的 TLSDESC 重定位要给出一对 16 字节：
-             *     [0] = resolver 函数地址（0 = 不再需要解析，直接用偏移）
+             *     [0] = resolver 函数地址
              *     [1] = 变量在 TLS 块内的偏移
-             * 客体随后用 `mrs xN,tpidr_el0` + 描述符里的偏移找到变量。
-             * 而 tpidr_el0 已被改写器换成宿主给的线程槽（KTLR 键），
-             * 所以宿主只需把**偏移**填进去即可 —— 不需要真的 TLS 分配器。
+             * 客体取变量时的实际指令序列（第 46 轮从**解压后的模块**里反汇编确认，
+             * 见 work/porting/ 的扫描脚本）：
+             *     adrp x0, <描述符页>
+             *     ldr  x1, [x0, #lo12]     ; x1 = desc[0] = resolver
+             *     add  x0, x0, #lo12       ; x0 = &desc[0]  ← 入参是描述符地址
+             *     blr  x1                  ; 回来时 x0 = TLS 偏移
+             *     mrs  x8, tpidr_el0       ; ← 已被改写器换成读宿主线程槽
+             *     add/str … [x8, x0]       ; 用「线程指针 + 偏移」访问变量
+             *
+             * !! 第 46 轮修的一个致命错 !!
+             *   上一版把 [0] 填成 **0**，注释还写「resolver 已不需要」——
+             *   那是错的：客体**真的会 blr 它**，于是 `blr 0` → 跳到地址 0 → 立刻崩。
+             *   现在填真正的 resolver（dm_tlsdesc_resolver，本文件下面实现）。
              *
              * 偏移从哪来：
              *   · 符号是 TLS 变量（st_value != 0）→ 用 st_value
              *   · 符号是匿名的（st_name 为空，如局部 TLS）→ 用 addend
-             * 实测（tlsdesc_selftest）：本模块 62 个 TLSDESC，
-             * 匿名那批 addend 都是小整数（8/16/192/2800/5552…），正是 TLS 偏移；
-             * 有名字那批是 `...tlsManage_E` 之类，st_value 非 0。
-             *
-             * 上一版**完全没处理这一类** —— 它们落到「未解析」分支，
-             * 于是 62 条填不上（客体一访问这些 TLS 变量就会读到 0 而崩）。 */
+             * 实测（tlsdesc_selftest）：NmplDLL 的 62 个 TLSDESC 全是这种形状，
+             * 匿名那批 addend 都是小整数（8/16/192/2800/5552…）正是 TLS 偏移；
+             * 有名字那批是 `...tlsManage_E` 之类，st_value 非 0（0x1640）。 */
             if (type == 1031) {
                 uint64_t tls_off;
                 if (m->symtab[si].st_value) tls_off = m->symtab[si].st_value;
                 else                         tls_off = (uint64_t)r->r_addend;
                 if (where + 16 <= m->base + m->size) {
-                    ((uint64_t *)where)[0] = 0;        /* resolver 已不需要 */
+                    ((uint64_t *)where)[0] = (uint64_t)(uintptr_t)dm_tlsdesc_resolver;
                     ((uint64_t *)where)[1] = tls_off;
                 }
                 st->n_tlsdesc++;

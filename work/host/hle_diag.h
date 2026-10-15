@@ -59,4 +59,24 @@ const char *dm_diag_last_event(void);
  * 这几个数字正好回答「帧循环有没有跑」「客体有没有到渲染」「画面为什么是黑的」。*/
 int dm_host_diag(char *buf, int n);
 
+/* ---- 崩溃时要用到的（信号处理里只有 `write(2)` 是安全的）---- */
+
+/* 登记一个模块的基址（装载时调）。这样崩溃时能把 PC 翻成「模块 + 偏移」，
+ * 直接拿去反汇编就知道是哪条指令炸的 —— 不用再猜。 */
+void dm_diag_set_module(const char *name, const void *base, unsigned long long size);
+
+/* 日志文件的 fd（-1 = 没有）。崩溃时直接往它写，不经 stdio。 */
+int  dm_diag_log_fd(void);
+
+/* 把地址翻成「模块名 + 偏移」。写入 out 并返回 1；不在任何模块内返回 0。
+ * **不做任何内存分配、不调 stdio** —— 信号处理里也能用。 */
+int  dm_diag_addr(unsigned long long addr, char *out, int n);
+
+/* 崩了：把信号号 / 故障地址 / PC / LR / SP / x0-x3 写进日志。
+ * 本函数只做「拼字符串 + write()」，别的什么都不做（信号安全）。
+ * x 可为 NULL。 */
+void dm_diag_crash_line(int sig, unsigned long long fault_addr,
+                        unsigned long long pc, unsigned long long lr,
+                        unsigned long long sp, const unsigned long long *x, int nx);
+
 #endif /* DM_HLE_DIAG_H */
