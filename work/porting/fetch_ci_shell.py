@@ -57,14 +57,14 @@ class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
 
 _OPENER = urllib.request.build_opener(_DropAuthOnRedirect)
 
-def want_run(sha=None):
+def want_run(sha=None, tok=None):
     """找要下载的 run：给了 sha 就找那个 commit 的，否则取 main 上最新一次"""
     if sha:
-        d = api('/repos/%s/actions/runs?head_sha=%s&per_page=10' % (REPO, sha))
+        d = api('/repos/%s/actions/runs?head_sha=%s&per_page=10' % (REPO, sha), tok)
         runs = [r for r in d['workflow_runs'] if r['name'] == 'Build iOS shell']
         if runs:
             return max(runs, key=lambda r: r['run_number'])
-    d = api('/repos/%s/actions/runs?branch=main&per_page=20' % REPO)
+    d = api('/repos/%s/actions/runs?branch=main&per_page=20' % REPO, tok)
     runs = [r for r in d['workflow_runs'] if r['name'] == 'Build iOS shell']
     if not runs:
         return None
@@ -72,7 +72,10 @@ def want_run(sha=None):
 
 def main():
     sha = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('-') else None
-    run = want_run(sha)
+    # 早点取 token：匿名调 API 每小时只有 60 次，连着跑几轮就会被 403 rate limit 挡住
+    # （本轮真被挡过一次）。带上凭据就是 5000 次/小时。
+    tok = token()
+    run = want_run(sha, tok)
     if not run:
         print('没找到任何 "Build iOS shell" 的运行'); return 2
     print('=' * 74)
@@ -86,7 +89,7 @@ def main():
     if run['conclusion'] != 'success':
         print('  这次**没成功**（%s）—— 先看日志' % run['conclusion']); return 4
 
-    arts = api('/repos/%s/actions/runs/%s/artifacts' % (REPO, run['id']))['artifacts']
+    arts = api('/repos/%s/actions/runs/%s/artifacts' % (REPO, run['id']), tok)['artifacts']
     pick = None
     for a in arts:
         if a['name'] == 'DmGame-shell-ipa' and not a['expired']:
@@ -95,7 +98,6 @@ def main():
         print('  没找到 DmGame-shell-ipa 产物'); return 5
     print('  产物 %s（%d 字节）' % (pick['name'], pick['size_in_bytes']))
 
-    tok = token()
     if not tok:
         print('  !! 取不到本机 git 凭据 —— 请从上面的 Actions 页面手动下载产物')
         return 6
@@ -142,6 +144,8 @@ def main():
         (b'DmFrameTick',            '第 43 轮：真正驱动帧循环的那个类'),
         (b'dm_ios_boot_async',      '第 43 轮：后台装载'),
         (b'dm_ios_make_window',     '第 43 轮：建窗口'),
+        (b'dm_diag_set_log',        '第 45 轮：诊断通道（日志文件）'),
+        (b'dm_host_diag',           '第 45 轮：诊断总览（客体走到哪 + NVN 计数）'),
         (b'dm_ios_res_dir',         '第 41 轮：iOS 上给绝对资源路径'),
         (b'dm_host_res_dir',        '第 41 轮：宿主侧资源目录'),
     ]
