@@ -268,6 +268,7 @@ int dm_plat_tls_install_count(void) { return g_tls_installs; }
 #define DM_APP_POOL  (3285ull << 20)      /* 应用内存池 3285 MB */
 static uint8_t *g_heap;
 static uint64_t g_heap_cap;
+static uint64_t g_heap_cur;               /* SetHeapSize 记账的大小（GetInfo 用） */
 
 int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
     if (!g_heap) {
@@ -282,6 +283,7 @@ int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
         dm_diag_mark("客体堆：预留 %llu MB @ %p", DM_APP_POOL >> 20, g_heap);
     }
     if (size > g_heap_cap) return 1;      /* ResultLimitReached —— 游戏会按 2MB 递减重试 */
+    g_heap_cur = size;
     if (base_out) *base_out = (uint64_t)g_heap;
     return 0;
 }

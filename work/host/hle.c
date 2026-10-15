@@ -235,6 +235,7 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
     case 0x29: {  /* GetInfo(id=x1, handle=x2, subid=x3) → x1 = 值（第 58 轮照 D2R 补全。
                      注意：之前这里被错标成 OutputDebugString，SDK 的 4 次 GetInfo
                      一直被垃圾 x1 糊弄 —— InfoType 表 = Atmosphère 标准编号）。 */
+        extern void dm_guest_stack_range(void **base, size_t *size);   /* aarch64: hle_nvn_guest.c；Windows: hle_nvn_boot.c */
         uint64_t id = r[DM_REG_X1], v = 0;
         uint64_t hbase = 0, hcap = 0, hcur = 0;
         dm_plat_heap_peek(&hbase, &hcap, &hcur);
