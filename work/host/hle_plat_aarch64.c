@@ -302,14 +302,14 @@ typedef struct {
 static dm_thr g_thrs[DM_NTHR];
 static pthread_mutex_t g_thr_lock = PTHREAD_MUTEX_INITIALIZER;
 
-extern void dm_thread_enter_asm(void *entry, void *arg, void *sp);   /* entry.S */
+extern void dm_thread_enter(void *entry, void *arg, void *sp);   /* entry.S 的 _dm_thread_enter */
 extern void dm_thread_returned(void);                                /* 本文件 ② */
 
 static void *dm_thr_trampoline(void *p) {
     dm_thr *t = p;
     dm_plat_tls_install();                     /* 本线程的 TLS/TLR/门槽（+TLR+0x1F0/0x1F8） */
     while (!__atomic_load_n(&t->started, __ATOMIC_ACQUIRE)) sched_yield();
-    dm_thread_enter_asm((void *)t->entry, (void *)t->arg, (void *)t->sp);
+    dm_thread_enter((void *)t->entry, (void *)t->arg, (void *)t->sp);
     dm_thread_returned();                      /* 客体入口不许返回 */
     return NULL;
 }
@@ -375,7 +375,7 @@ void dm_gate_dispatch_c(uint64_t ret, uint64_t *regs) {
 /* ---------------- ④ 客体线程切栈入口（汇编在 entry.S） ---------------- */
 /* dm_thread_enter(entry, arg, sp) 由 entry.S 的 _dm_thread_enter 实现。
    这里只做一次「非空检查」，避免传空指针进去后 brk。 */
-extern void dm_thread_enter_asm(void *entry, void *arg, void *sp);
+extern void dm_thread_enter(void *entry, void *arg, void *sp);   /* entry.S 的 _dm_thread_enter */
 
 /* ---------------- NVN 未实现入口 ---------------- */
 /* 跳板表里「没有实现」的槽指向这里。它必须**不崩**并且能报出是哪一个
