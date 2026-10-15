@@ -27,6 +27,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Windows 自测覆盖 dm_plat_tlr_addr() 的返回值（hle_plat.h 已声明 extern）。
+ * 放在 hle.c 里是为了让每个链接 hle.c 的 exe 都有定义（避免其它自测 LNK2019）。 */
+#if !defined(__aarch64__) && !defined(_M_ARM64)
+uint64_t dm_test_tlr_override = 0;
+#endif
+
 /* ---------------- 门表 ---------------- */
 
 static int cmp_ent(const void *a, const void *b) {
@@ -218,25 +224,44 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                      （.ips：esr 是 svc、崩溃指令 ldr w10,[x9]、x9 = 句柄本身）。
                      switchbrew SVC 表：0x21 = SendSyncRequest(Handle)（**无缓冲参数**）；
                      0x22 才是 SendSyncRequestWithUserBuffer(buf, size, handle)。
-                     ==> 本调用**绝不碰内存**，只回成功（与 D2R hle_svc.c 的默认分支同语义）。
-                     诊断：请求消息就在「本线程 TLR 头 0x100 字节」（Horizon 的线程本地 IPC
-                     命令缓冲）——抄出来看 sm: 在请求什么（下一步要做真应答时的关键线索）。 */
+                     ==> 本调用**绝不把句柄当指针读**，只回成功（与 D2R hle_svc.c 的默认分支同语义）。
+                     第 60 轮：SDK 的 sm: 初始化在调用前后会用 TLR 头做「内核有没有真处理」探针：
+                       调用前：TLR[0..7] = 0x8000000000000010, TLR[8..11] = 1
+                       调用后：TLR[0..7] = 0x0000000100000010, TLR[8..11] = 0
+                       若探针未被清零，SDK 认为 IPC 失败并 Abort（r59 真机停在第 121 帧）。
+                     因此当 TLR 头呈现上述请求形态时，我们把它改写成标准应答形态。 */
         uint64_t sess = r[DM_REG_X0];
-        static unsigned n_ssr;
-        if (n_ssr++ < 16) {
-            uint64_t tlr = dm_plat_tlr_addr();
-            if (tlr) {
-                /* 注意：dm_diag_mark 的缓冲 192 字节 —— 只抄 6 个 word（够覆盖
-                   CMIF 头：magic/版本/命令号/参数），别把行撑爆被截断。 */
-                volatile unsigned *w = (volatile unsigned *)tlr;
-                dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) ok；TLR头=%08x %08x %08x %08x %08x %08x",
+        uint64_t tlr = dm_plat_tlr_addr();
+        int wrote_response = 0;
+        if (tlr) {
+            volatile uint64_t *h = (volatile uint64_t *)tlr;
+            volatile uint32_t *w = (volatile uint32_t *)tlr;
+            uint64_t hdr = h[0];
+            uint32_t probe = w[2];
+            if (probe == 1 && hdr == 0x8000000000000010ULL) {
+                /* Horizon CMIF 请求 → 应答：清请求标志、写结果头、清探针。
+                 * 这是 sm: 初始化唯一需要的最小欺骗；后续服务若用不同请求头再补。 */
+                h[0] = 0x0000000100000010ULL;
+                w[2] = 0;
+                wrote_response = 1;
+                dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) ok -> TLR=%llx 写应答头 0x%lx 探针 1->0",
                              n, (unsigned long long)sess,
-                             w[0], w[1], w[2], w[3], w[4], w[5]);
-            } else {
-                dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) → 成功", n,
-                             (unsigned long long)sess);
+                             (unsigned long long)tlr, 0x0000000100000010ULL);
+            } else if (n == 0x21) {
+                /* 其它形态：只读日志，暂不盲写 —— 等日志告诉我们这是什么服务。 */
+                static unsigned n_ssr_other;
+                if (n_ssr_other++ < 16)
+                    dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) ok；TLR头=%08x %08x %08x %08x %08x %08x",
+                                 n, (unsigned long long)sess,
+                                 w[0], w[1], w[2], w[3], w[4], w[5]);
             }
+        } else {
+            static unsigned n_ssr_no_tlr;
+            if (n_ssr_no_tlr++ < 4)
+                dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) ok（无 TLR）", n,
+                             (unsigned long long)sess);
         }
+        (void)wrote_response;  /* 未来调试用 */
         r[DM_REG_X0] = 0;
         return 0; }
     case 0x22: { /* SendSyncRequestWithUserBuffer(buf=x0, size=x1, 句柄=x2) —— 第 59 轮加。

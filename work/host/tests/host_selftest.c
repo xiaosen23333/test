@@ -13,10 +13,14 @@
  *   5. 未实现的调用 → 假成功（x0=0、其它寄存器原样；第 59 轮策略，防 SDK 错误路径）
  *   6. **句柄不是指针**：svc 0x21/0x22 收到会话句柄值（0xC0000002）时绝不许 deref
  *      —— deref 的话本测试进程当场崩（正是第 59 轮真机 .ips 的复现）
+ *   7. TLR 应答头改写（第 60 轮）：svc 0x21 看到 TLR 头是 Horizon IPC 请求形态时，
+ *      必须把它改成应答形态并清探针，否则 SDK 会 Abort。Windows 自测通过
+ *      dm_test_tlr_override 指向本地缓冲区来验证这条路径。
  *
  * 打印一律用 ASCII（Windows 控制台代码页不可控，中文会乱码）。
  */
 #include "../hle.h"
+#include "../hle_plat.h"   /* dm_test_tlr_override：覆盖 TLR 地址做回归测试 */
 
 #include <stdio.h>
 #include <string.h>
@@ -187,6 +191,32 @@ static int run_file(const char *path) {
         else { bad6++; printf("  [6] svc22 -> x0=%#llx (expected 0)\n", (unsigned long long)r4[0]); }
     }
     bad_all += bad6;
+
+    /* 判据 7：TLR 应答头改写（r60）。Windows 通过覆盖 dm_test_tlr_override
+     * 指向本地缓冲区，验证内建实现确实把请求头 0x8000000000000010 + 探针 1
+     * 改成应答头 0x0000000100000010 + 探针 0。 */
+    int bad7 = 0;
+    if (e21) {
+        uint64_t tlr_buf[4] = { 0 };
+        volatile uint32_t *wb = (volatile uint32_t *)tlr_buf;
+        volatile uint64_t *hb = (volatile uint64_t *)tlr_buf;
+        /* 请求形态：h[0]=0x8000000000000010, w[2]=1 */
+        hb[0] = 0x8000000000000010ULL;
+        wb[2] = 1;
+        dm_test_tlr_override = (uint64_t)tlr_buf;
+        for (int k = 0; k < DM_REG_COUNT; k++) r4[k] = 0;
+        r4[DM_REG_X0] = 0xC0000002ull;
+        dm_gate_dispatch(&h2, e21->ret, r4);
+        dm_test_tlr_override = 0;   /* 恢复 */
+        if (r4[DM_REG_X0] == 0 && hb[0] == 0x0000000100000010ULL && wb[2] == 0)
+            printf("  [7] svc21 TLR response header: ok (probe 1->0) OK\n");
+        else {
+            bad7++;
+            printf("  [7] svc21 TLR response header: x0=%#llx hdr=%#llx probe=%u (expected x0=0 hdr=0x100000010 probe=0)\n",
+                   (unsigned long long)r4[0], (unsigned long long)hb[0], wb[2]);
+        }
+    }
+    bad_all += bad7;
 
     printf("  file total mismatches: %d\n\n", bad_all);
     return bad_all;

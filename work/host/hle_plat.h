@@ -66,7 +66,9 @@ void dm_plat_heap_peek(uint64_t *base, uint64_t *cap, uint64_t *cur);
 #if !defined(__aarch64__) && !defined(_M_ARM64)
 static void dm_plat_dump_slots_crash(void) { }
 static void dm_plat_slots_guard(uint64_t ret) { (void)ret; }
-static uint64_t dm_plat_tlr_addr(void) { return 0; }
+/* Windows 自测里可覆盖这个值来验证 TLR 应答头改写（第 60 轮）。 */
+extern uint64_t dm_test_tlr_override;
+static uint64_t dm_plat_tlr_addr(void) { return dm_test_tlr_override; }
 static int  dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
     (void)size; if (base_out) *base_out = 0x10000000ull; return 0;   /* 自测用假堆 */
 }
