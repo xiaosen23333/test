@@ -589,6 +589,20 @@ const char *dm_ios_docs_dir(void) {
     return buf;
 }
 
+/* Guest.framework/Guest 的绝对路径。
+ *
+ * 为什么需要（第 50 轮）：iOS 不允许普通 App 执行运行时写进内存的代码，
+ * 所以模块映像被装进一个**会被自签工具签名的** dylib；
+ * 装载器（loader.c 的 dm_loader_map_embedded）从这里取段、用 vm_remap 搬回原始布局。 */
+const char *dm_ios_guest_dylib_path(void) {
+    static char buf[1300];
+    if (buf[0]) return buf;                            /* 缓存一次 */
+    NSString *p = [NSBundle mainBundle].bundlePath;
+    const char *c = p.UTF8String;
+    if (c && c[0]) snprintf(buf, sizeof buf, "%s/Frameworks/Guest.framework/Guest", c);
+    return buf;                                        /* 取不到就返回空串，装载器会如实报错 */
+}
+
 /* 模块与着色器所在的目录：<bundle>/dm
  *
  * 为什么需要它：iOS 上 App 的**当前工作目录不是 bundle 目录**，

@@ -63,6 +63,7 @@ typedef struct {
     unsigned       nsym;
     const dm_rela *rela, *jmprel;
     uint64_t       relasz, pltsz;
+    int            embedded;      /* 1 = 从已签名的 Guest.framework vm_remap 而来（iOS 真机） */
 } dm_module;
 
 typedef struct {
@@ -116,6 +117,14 @@ uint64_t dm_tlsdesc_resolver(uint64_t *desc);
  *   **改写器补丁区** [PATCH_OFF, +LEN) → R+X   ← 客体的改写代码全在这儿
  * 返回 0 表示全部成功；>0 = 失败的区段数（失败原因由 loader.c 记进诊断日志）。 */
 int dm_loader_finalize(dm_module *m);
+
+/* iOS 真机专用：从**会被代码签名的** Guest.framework/Guest 里取段，
+ * vm_remap 回原始相对布局（代码页共享已签名页，可写段写时复制）。
+ * 为什么必须这样：iOS 不允许普通 App 执行运行时写进内存的代码 ——
+ * 匿名页 mmap(RW)→mprotect(R+X) 返回成功但一执行就被内核干掉（第 50 轮实测）。
+ * 节布局与 work/tools/guest_dylib.py 的约定一致；两者对不上会直接报错。 */
+int dm_loader_map_embedded(dm_module *m, unsigned idx, const char *name,
+                           unsigned key_values[DM_KEY_COUNT]);
 
 /* ---- 执行自检（第 49 轮加）----
  *

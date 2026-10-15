@@ -20,6 +20,10 @@ PROJ = os.path.dirname(DM_ROOT)                        # D:\d2r-mobile
 
 # 改写后的 5 个模块（改写器产物）
 MODULES = ['main', 'sdk', 'rtld', 'NmplDLL.nro', 'lz4.nro']
+
+# Guest.framework 里节的**下标顺序** —— 必须与 work/host/hle_nvn_boot.c 的
+# g_mod_names[] 逐字一致（那边是装载顺序：rtld → sdk → main → NmplDLL → lz4）
+GUEST_ORDER = ['rtld', 'sdk', 'main', 'NmplDLL.nro', 'lz4.nro']
 # 每个模块需要随附的元数据（装载器要读 fixups.tsv 与 gates.tsv）
 MODULE_META = ['fixups.tsv', 'gates.tsv']
 
@@ -46,6 +50,42 @@ def build_manifest(patcher_out, shader_dir, ios_dir, data_dir=None, data_mode='m
     items = []   # (包内相对路径, 源路径, 说明)
     def add(inner, src, note):
         items.append((inner, src, note))
+
+    # ⓿ Guest.framework：**iOS 只能执行「会被代码签名」的代码页**
+    #
+    # 为什么需要它（第 50 轮真机实测）：
+    #   iOS 不允许普通 App 执行运行时写进内存的代码 —— 匿名页 mmap(RW)→mprotect(R+X)
+    #   返回成功，但一执行进程就被内核干掉（连崩溃行都留不下）。
+    #   所以模块映像要装进一个**会被自签工具签名的 Mach-O**（这里是一个只装段的 dylib），
+    #   装载器再用 vm_remap 把它的**已签名**代码页搬回原始布局。
+    #   节布局与 work/host/loader.c 的 dm_loader_map_embedded 约定一致。
+    try:
+        import subprocess
+        tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'guest_dylib.py')
+        fwdir = os.path.join(os.path.dirname(patcher_out), 'guestfw')
+        # !! 顺序必须与 work/host/hle_nvn_boot.c 的 g_mod_names[] 完全一致 !!
+        # 节名用的是下标（__dm<i>x0），所以「谁排在前面」直接决定装载器去哪个节取段。
+        # 注意 MODULES 的书写顺序与装载器不同（历史上一个按 ExeFS 一个按装载次序），
+        # 所以这里显式用 GUEST_ORDER，并在下面核对 sections.tsv。
+        r = subprocess.run([sys.executable, tool, patcher_out, fwdir] + GUEST_ORDER,
+                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+        if r.returncode != 0:
+            die('生成 Guest.framework 失败：%s%s' % (r.stdout or '', r.stderr or ''))
+        fw = os.path.join(fwdir, 'Guest.framework')
+        # 核对：工具写出的模块顺序必须与装载器一致，否则装到机器上是"节的长度对不上"
+        sec = os.path.join(fw, 'sections.tsv')
+        if os.path.exists(sec):
+            got = [l.split('\t')[1] for l in open(sec, encoding='utf-8').read().splitlines() if l and not l.startswith('#')]
+            if got != GUEST_ORDER:
+                die('Guest.framework 的模块顺序与装载器不一致：%s != %s' % (got, GUEST_ORDER))
+        add('Frameworks/Guest.framework/Guest', os.path.join(fw, 'Guest'),
+            'iOS 可执行段（会被签名的 dylib）')
+        add('Frameworks/Guest.framework/Info.plist', os.path.join(fw, 'Info.plist'),
+            '同上')
+    except SystemExit:
+        raise
+    except Exception as e:
+        die('生成 Guest.framework 异常：%s' % e)
 
     # ① 改写后的 5 个模块 + 元数据
     for m in MODULES:

@@ -24,6 +24,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>       /* 执行自检要报 errno */
+#if defined(__APPLE__)
+  #include <TargetConditionals.h>
+  #if TARGET_OS_IPHONE
+    #include <mach-o/dyld.h>
+    #include <mach-o/getsect.h>
+    #include <dlfcn.h>
+  #endif
+#endif
 
 /* ---------------- TLSDESC 的 resolver（第 46 轮加） ----------------
  *
@@ -156,6 +164,10 @@ int dm_loader_read_fixups(dm_layout *L, const char *path) {
 
 /* ---------------- 模块映射 ---------------- */
 
+/* loader_finish 定义在下面，但 dm_loader_map 先用到它 —— 变量/函数都没有
+   "后补声明"这回事，必须先声明后用（本项目的 check_use_before_decl.py 会查）。 */
+static int loader_finish(dm_module *m, unsigned key_values[DM_KEY_COUNT]);
+
 int dm_loader_map(dm_module *m, const char *bin_path, const char *fixups_path,
                   unsigned key_values[DM_KEY_COUNT]) {
     memset(m, 0, sizeof *m);
@@ -189,7 +201,15 @@ int dm_loader_map(dm_module *m, const char *bin_path, const char *fixups_path,
     if (!m->base) { free(raw); return -4; }
     memcpy(m->base, raw, sz);
     free(raw);
+    return loader_finish(m, key_values);
+}
 
+/* ---------------- 装载收尾（两种映射路径共用） ----------------
+ * 键页 / MOD0 / 动态段解析 —— 这一段与「映像从哪来」无关：
+ *   · 文件路径（Windows 自测、macOS 开发）：mmap 一块 RW 再 memcpy 进去
+ *   · iOS 真机：从已签名的 Guest.framework 里 vm_remap 过来（见 dm_loader_map_embedded）
+ * 抽出来是为了让两条路径**跑的是同一段代码**，避免又出现"两边行为不一致"。 */
+static int loader_finish(dm_module *m, unsigned key_values[DM_KEY_COUNT]) {
     /* 键页：写「pthread 键号 × 8」，并把它设为只读（真机侧；Windows 侧跳过） */
     if (m->L.key_page_off + m->L.key_page_size > m->size) return -5;
     uint64_t *page = (uint64_t *)(m->base + m->L.key_page_off);
@@ -230,6 +250,108 @@ int dm_loader_map(dm_module *m, const char *bin_path, const char *fixups_path,
 static void *(*g_fallback)(const char *name) = NULL;
 void dm_loader_set_fallback(void *(*fn)(const char *name)) { g_fallback = fn; }
 
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+/* ==================================================================
+ * iOS：从**会被代码签名的** Guest.framework/Guest 里取段，vm_remap 回原布局
+ * ==================================================================
+ *
+ * 为什么必须这样（第 50 轮真机实测）：
+ *   iOS **不允许**普通 App 执行「运行时写进内存」的代码。实测：匿名页 mmap(RW)
+ *   → mprotect(R+X) **返回成功**，但一执行进程就被内核干掉（无信号、无看门狗，
+ *   日志停在那一行）。这正是「客体第一条指令就没了」的真因。
+ * 正确做法（照 D2R 的做法，见本仓库 dm/host/loader.c 的注释）：
+ *   把映像放进一个**会被签名**的 Mach-O（用户侧自签工具给整包签名），运行时只做
+ *   vm_remap：代码页 copy=FALSE（与 dylib 的 __TEXT 共享同一批**已签名页**，本来就 r-x），
+ *   可写部分 copy=TRUE（写时复制）。代码页从没被写过、本来就是签名的可执行页 ⇒ 可执行。
+ *
+ * 节布局由 work/tools/guest_dylib.py 写出（两边约定必须一致）：
+ *   __TEXT,__dm<i>x0    [0, r16(TEXT_END))
+ *   __DM<i>W,__img      [r16(TEXT_END), PATCH_OFF)
+ *   __TEXT,__dm<i>x1    [PATCH_OFF, r16(映像尾))
+ */
+static void dm_remap_at(const char *name, vm_address_t to, const void *from,
+                        unsigned long size, boolean_t copy, vm_prot_t need) {
+    vm_address_t a = to;
+    vm_prot_t cur = 0, max = 0;
+    kern_return_t kr = vm_remap(mach_task_self(), &a, size, 0,
+                                VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                                mach_task_self(), (vm_address_t)from, copy,
+                                &cur, &max, VM_INHERIT_NONE);
+    if (kr != KERN_SUCCESS || a != to) {
+        dm_diag_mark("**vm_remap 失败** %s from=%p to=%p size=%#lx kr=%d",
+                     name, from, (void *)to, size, (int)kr);
+        return;
+    }
+    if ((cur & need) != need)
+        dm_diag_mark("vm_remap 后权限不足 %s: 实际 %#x 需要 %#x", name, cur, need);
+}
+
+int dm_loader_map_embedded(dm_module *m, unsigned idx, const char *name,
+                           unsigned key_values[DM_KEY_COUNT]) {
+    memset(m, 0, sizeof *m);
+    snprintf(m->name, sizeof m->name, "%s", name);
+
+    /* fixups 与其它元数据在包内 dm/ 下（与文件路径同一套） */
+    extern const char *dm_host_res_dir(void);
+    char fix[1400];
+    snprintf(fix, sizeof fix, "%s/%s.fixups.tsv", dm_host_res_dir(), name);
+    if (dm_loader_read_fixups(&m->L, fix)) return -1;
+
+    /* 打开那个只装段的 dylib（iOS 外壳给出绝对路径） */
+    extern const char *dm_ios_guest_dylib_path(void);
+    const char *path = dm_ios_guest_dylib_path();
+    void *h = path ? dlopen(path, RTLD_NOW) : NULL;
+    if (!h) {
+        dm_diag_mark("**dlopen 失败** path=%s err=%s",
+                     path ? path : "(null)", dlerror() ? dlerror() : "?");
+        return -2;
+    }
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)h;
+
+    char sn0[20], sn1[20], wn[20];
+    snprintf(sn0, sizeof sn0, "__dm%ux0", idx);
+    snprintf(sn1, sizeof sn1, "__dm%ux1", idx);
+    snprintf(wn,  sizeof wn,  "__DM%uW",  idx);
+    unsigned long s0 = 0, sw = 0, s1 = 0;
+    const uint8_t *p0 = getsectiondata(mh, "__TEXT", sn0, &s0);
+    const uint8_t *pw = getsectiondata(mh, wn,     "__img", &sw);
+    const uint8_t *p1 = getsectiondata(mh, "__TEXT", sn1, &s1);
+    if (!p0 || !pw || !p1) {
+        dm_diag_mark("**找不到节** %s（%s / %s.__img / %s）", name, sn0, wn, sn1);
+        return -3;
+    }
+
+    unsigned long a   = (unsigned long)((m->L.text_end + 0x3FFF) & ~(uint64_t)0x3FFF);
+    unsigned long po  = (unsigned long)m->L.patch_off;
+    m->size           = (size_t)((m->L.image_size + 0x3FFF) & ~(uint64_t)0x3FFF);
+    unsigned long end = (unsigned long)m->size;
+
+    /* 节长度必须与 fixups 推出的布局吻合 —— 不吻合说明「生成工具」与「装载器」
+       的约定被改歪了（例如模块顺序不同），这时必须报错，不能凑合跑 */
+    int bad = 0;
+    if (s0 != a)        { dm_diag_mark("节长不符 %s: %s=%lu 期望 %lu", name, sn0, s0, a);          bad = 1; }
+    if (sw != po - a)   { dm_diag_mark("节长不符 %s: %s=%lu 期望 %lu", name, wn, sw, po - a);        bad = 1; }
+    if (s1 != end - po) { dm_diag_mark("节长不符 %s: %s=%lu 期望 %lu", name, sn1, s1, end - po);     bad = 1; }
+    if (bad) return -4;
+
+    /* 占一块连续 VA，再把三段 remap 回原始相对位置 */
+    vm_address_t base = 0;
+    kern_return_t kr = vm_allocate(mach_task_self(), &base, end, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) { dm_diag_mark("vm_allocate 失败 kr=%d", (int)kr); return -5; }
+    m->base = (uint8_t *)base;
+    m->embedded = 1;
+
+    dm_remap_at(name, base,      p0, s0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE); /* 代码：共享已签名页 */
+    dm_remap_at(name, base + a,  pw, sw, TRUE,  VM_PROT_READ | VM_PROT_WRITE);  /* 可写：写时复制 */
+    dm_remap_at(name, base + po, p1, s1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE); /* 补丁区：共享已签名页 */
+
+    int rc = loader_finish(m, key_values);
+    dm_diag_mark("embedded 映射 %s：base=%p 代码=%p 可写=%p 补丁=%p rc=%d",
+                 name, (void *)base, (void *)p0, (void *)pw, (void *)p1, rc);
+    return rc;
+}
+#endif /* __APPLE__ && TARGET_OS_IPHONE */
 
 /* ---------------- 执行自检 + 保护位查询（第 49 轮加） ----------------
  *
@@ -316,6 +438,7 @@ int dm_loader_query_prot(const dm_module *m, char *out, int n) {
     return -1;      /* 非 Apple：不支持（Windows 自测里不查） */
 #endif
 }
+
 
 /* ---------------- 页保护（第 48 轮加 —— 真机「第一条客体指令就没了」的真因） --------
  *
@@ -500,6 +623,12 @@ int dm_loader_register_gates(dm_host *h, dm_gate_ent *tbl, size_t cap,
 /* ---------------- 总入口 ---------------- */
 
 void dm_loader_unmap(dm_module *m) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    if (m->embedded) {   /* vm_remap 来的：用 vm_deallocate 还回去 */
+        if (m->base) vm_deallocate(mach_task_self(), (vm_address_t)m->base, m->size);
+        m->base = NULL; m->embedded = 0; return;
+    }
+#endif
     if (m && m->base) { os_unmap(m->base, m->size); m->base = NULL; m->size = 0; }
 }
 

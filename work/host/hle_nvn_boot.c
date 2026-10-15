@@ -41,6 +41,9 @@
 #include "hle_nvn_glslc.h"
 #include "hle_host_dir.h"      /* dm_host_res_dir()：资源目录（iOS 上必须是绝对路径） */
 #include "hle_diag.h"          /* 诊断通道：把「走到哪一步」写进日志/屏幕 */
+#if defined(__APPLE__)
+  #include <TargetConditionals.h>   /* TARGET_OS_IPHONE：iOS 走 embedded 装载路径 */
+#endif
 
 /* hle_nn_fs.c 提供（该文件没有配套头文件，故在此声明） */
 extern void dm_nn_fs_set_romfs_root(const char *dir);
@@ -165,7 +168,15 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
         snprintf(fix, sizeof fix, "%s/%s.fixups.tsv", dir, g_mod_names[i]);
         /* 不要预设 m->name —— dm_loader_map 会 memset 结构，名字它自己推导 */
         dm_module *m = &g_ctx.mods[g_ctx.nmods];
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        /* iOS 真机：映像不在文件里（也不可能是我们运行时写出来的可执行页 —— 那样
+           一执行就被内核干掉）。它在一个**会被代码签名**的 Guest.framework 里，
+           我们只做 vm_remap 把已签名的代码页搬回原始布局。见 dm_loader_map_embedded。 */
+        int rc = dm_loader_map_embedded(m, i, g_mod_names[i], g_ctx.key_values);
+        (void)bin; (void)fix;
+#else
         int rc = dm_loader_map(m, bin, fix, g_ctx.key_values);
+#endif
         if (rc) {
             fprintf(stderr, "[dm] 装载 %s 失败 rc=%d (%s)\n", g_mod_names[i], rc, dm_loader_err(rc));
             dm_diag_mark("装载失败：第 %u 个模块 %s rc=%d", i, g_mod_names[i], rc);
@@ -211,9 +222,11 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
      *   · 能返回 → 日志会写「执行自检：成功」
      *   · 进程直接没了 → 日志最后一行就是「即将调用 RW→RX 匿名页里的 ret」
      * 两种结果都会留在日志里，下次启动屏幕上就能看到。 */
-    dm_diag_mark("即将做执行自检（匿名页 RW→RX 后执行一条 ret）");
-    dm_diag_mark("执行自检结果 rc=%d（0=成功；-2= mprotect 失败）",
-                 dm_loader_exec_selftest());
+    /* !! 不要再在启动路径上跑"匿名页执行自检" !!
+     * 第 49 轮跑过一次，结论已经拿到（真机日志停在那一行）：**iOS 不允许执行
+     * 运行时变成可执行的匿名页** —— 一执行进程就被内核干掉，连崩溃行都留不下。
+     * 现在改成 D2R 的做法（已签名的 dylib + vm_remap，见 dm_loader_map_embedded），
+     * 所以这条自检留在 loader.c 里当"探针"，**不在正常启动路径上调用**。 */
 
     /* 顺便问内核：各模块代码页**实际**的保护位（不是我们以为设了什么） */
     for (unsigned i = 0; i < g_ctx.nmods; i++) {

@@ -175,6 +175,24 @@ def main():
             print('   OK  %-56s (%d 个顶格 static 变量)' % (rel, len(decl)))
     total += vtotal
 
+    # 括号配平（第 50 轮加的：我抽公共函数时漏掉一个 `}`，
+    # 结果 17 个自测全部编译失败 —— 而且报错指向后面每个函数，很难一眼看出真因）
+    print()
+    print('=' * 78)
+    print('检查：花括号/圆括号配平（用**去掉注释与字符串**后的文本数）')
+    print('=' * 78)
+    btotal = 0
+    for p in files:
+        code = strip_code(open(p, encoding='utf-8', errors='replace').read())
+        cb, ob = code.count('{') - code.count('}'), code.count('(') - code.count(')')
+        rel = os.path.relpath(p, os.path.dirname(ROOT)).replace('\\', '/')
+        if cb or ob:
+            btotal += 1
+            print('   !! %-56s {} 差 %+d  () 差 %+d' % (rel, cb, ob))
+    if not btotal:
+        print('   OK  所有文件配平')
+    total += btotal
+
     print()
     print('=' * 78)
     if total:
