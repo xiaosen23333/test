@@ -100,11 +100,14 @@ void *dm_host_get_guest_entry(void) { return g_guest_entry; }
  * printf 全都**定义在 sdk 里**），所以锁的初始化是客体自己的事 ——
  * 宿主只需**调** _init_libc1，而不是去提供它的实现。 */
 typedef struct {
-    void *init_libc1;      /* sdk + 0x56c210   —— 必须调，否则自锁死 */
-    void *init_array;      /* ELF `_init`      —— 跑 C++ 静态构造；本游戏 dynsym 里没有 */
-    void *os_initialize;   /* sdk + 0x1493e0 */
-    void *init_startup;    /* main + 0x9ac350 */
-    void *nn_main;         /* main + 0x9aec30  —— 客体入口 */
+    void *init_libc0;      /* sdk::_init_libc0（D2R 的脚本里第一个） */
+    void *os_initialize;   /* nnosInitialize（x0 = 主线程 ThreadType*，x1 = 0） */
+    void *init_libc1;      /* sdk::_init_libc1（libc 锁；略过会自锁死） */
+    void *sdk_module;      /* nninitInitializeSdkModule */
+    void *init_startup;    /* nninitStartup */
+    void *init_libc2;      /* sdk::_init_libc2 */
+    void *init_array;      /* 各模块 DT_INIT（_init）—— 全局构造函数 */
+    void *nn_main;         /* nnMain —— 客体入口 */
     int   n_found;
 } dm_guest_boot_plan;
 
@@ -300,20 +303,28 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
      *   nnMain         -> main + 0x9aec30   （客体入口）
      * 反汇编核对：nnMain 是 `ldr x30,[sp],#0x20 ; b`（尾调用跳板），
      * nninitStartup 是正常函数体 —— 两次独立确认。 */
-    g_plan.init_libc1    = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "_init_libc1");
-    g_plan.init_array    = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "_init");
+    /* 顺序照 D2R 的 dm/host/main.c（那是真机验证过的）：
+     *   _init_libc0 → nnosInitialize → _init_libc1 → nninitInitializeSdkModule
+     *   → nninitStartup → _init_libc2 → 各模块 DT_INIT → nnMain
+     * 每一格都可能为 NULL（本游戏的 dynsym 里未必都有），guest_main 会逐个跳过并如实打标记。 */
+    g_plan.init_libc0    = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "_init_libc0");
     g_plan.os_initialize = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "nnosInitialize");
+    g_plan.init_libc1    = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "_init_libc1");
+    g_plan.sdk_module    = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "nninitInitializeSdkModule");
     g_plan.init_startup  = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "nninitStartup");
+    g_plan.init_libc2    = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "_init_libc2");
+    g_plan.init_array    = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "_init");
     g_plan.nn_main       = (void *)dm_loader_sym(g_ctx.mods, g_ctx.nmods, "nnMain");
-    g_plan.n_found = (g_plan.init_libc1 ? 1 : 0) + (g_plan.init_array ? 1 : 0) +
-                     (g_plan.os_initialize ? 1 : 0) + (g_plan.init_startup ? 1 : 0) +
-                     (g_plan.nn_main ? 1 : 0);
+    g_plan.n_found = (g_plan.init_libc0 ? 1 : 0) + (g_plan.os_initialize ? 1 : 0) +
+                     (g_plan.init_libc1 ? 1 : 0) + (g_plan.sdk_module ? 1 : 0) +
+                     (g_plan.init_startup ? 1 : 0) + (g_plan.init_libc2 ? 1 : 0) +
+                     (g_plan.init_array ? 1 : 0) + (g_plan.nn_main ? 1 : 0);
     g_guest_entry = g_plan.nn_main;
     g_boot_info.guest_entry_found = g_plan.nn_main ? 1 : 0;
     g_boot_info.plan_found = g_plan.n_found;
 
     /* 装载完成 —— 这一行长期留在屏幕/日志上（真机排障的第一条线索） */
-    dm_diag_boot("模块 %u 重定位 %llu 门 %u 未解析 %u 计划 %d/5 着色器 %d NVN %d 页保护失败 %d",
+    dm_diag_boot("模块 %u 重定位 %llu 门 %u 未解析 %u 计划 %d/8 着色器 %d NVN %d 页保护失败 %d",
                  g_boot_info.nmods, (unsigned long long)g_boot_info.n_relocs,
                  g_boot_info.ngates, g_boot_info.nunres,
                  g_boot_info.plan_found, g_boot_info.shaders_loaded,

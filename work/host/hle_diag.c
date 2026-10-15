@@ -121,7 +121,7 @@ void dm_diag_stage(int stage, const char *fmt, ...) {
     va_end(ap);
 
     g_stage_no = stage;
-    snprintf(g_stage, sizeof g_stage, "%d/5 %s", stage, s);
+    snprintf(g_stage, sizeof g_stage, "第 %d 步 %s", stage, s);
 
     char line[224];
     snprintf(line, sizeof line, "[客体] 第 %d 步：%s", stage, s);

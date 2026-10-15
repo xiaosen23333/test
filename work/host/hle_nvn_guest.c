@@ -27,6 +27,7 @@
 #include "loader.h"
 #include "hle_nn.h"
 #include "hle_diag.h"      /* 诊断通道：五步各打一个标记（真机上这是唯一能看到的东西） */
+#include <stdint.h>     /* uintptr_t —— nnosInitialize 传主线程块地址 */
 #include "hle_plat.h"      /* dm_plat_tls_install：进客体前必须先把 4 个线程槽装好 */
 /* 注意：没有 hle_nvn_boot.h —— 启动逻辑在 hle_nvn_boot.c 里，
    它的接口只有三个函数，直接在这里声明（我第一版 #include 了一个不存在的头，
@@ -57,13 +58,24 @@ static unsigned char g_guest_stack[DM_GUEST_STACK_SIZE] __attribute__((aligned(1
    注意：这里**必须**与那边的字段顺序完全相同 —— 两处独立定义是隐患，
    理想做法是提到头文件共用（我在第 29 轮的错里记过这条）。 */
 typedef struct {
-    void *init_libc1;      /* sdk + 0x56c210 */
-    void *init_array;      /* ELF _init */
-    void *os_initialize;   /* sdk + 0x1493e0 */
-    void *init_startup;    /* main + 0x9ac350 */
-    void *nn_main;         /* main + 0x9aec30 */
+    void *init_libc0;      /* sdk::_init_libc0 */
+    void *os_initialize;   /* nnosInitialize（x0 = 主线程 ThreadType*，x1 = 0） */
+    void *init_libc1;      /* sdk::_init_libc1 */
+    void *sdk_module;      /* nninitInitializeSdkModule */
+    void *init_startup;    /* nninitStartup */
+    void *init_libc2;      /* sdk::_init_libc2 */
+    void *init_array;      /* 各模块 DT_INIT（_init）—— 全局构造函数 */
+    void *nn_main;         /* nnMain */
     int   n_found;
 } dm_guest_boot_plan_t;
+/* !! 上面这 9 个字段的顺序必须与 hle_nvn_boot.c 的 dm_guest_boot_plan 完全相同 !!
+   （两处独立定义是隐患，理想做法是提到一个头文件里共用。） */
+
+/* nnosInitialize 的 x0 是「主线程的 ThreadType*」：
+   真机上由 rtld/kernel 提供。宿主不跑 rtld、也不做线程对象层，给一块
+   **零填充的、客体可见的内存**即可 —— SDK 只是把它存进全局，后续 nn::os 调用
+   会拿它来找宿主实现（我们那边按对象地址记账）。 */
+static unsigned char g_main_thread_type[0x200] __attribute__((aligned(16)));
 
 /* 主体：真正的“进客体”逻辑。放在单独函数里，是为了让 dm_host_enter_guest
    只承担「调一次」的职责，便于以后加诊断。 */
@@ -102,6 +114,7 @@ static void guest_main(void) {
      *   若卡在某一步不再前进，把这五步各自的耗时打出来就能定位。
      */
     typedef void (*fn0)(void);
+    typedef void (*fn2)(uint64_t, uint64_t);   /* nnosInitialize(主线程句柄, 0) */
 
     /* !! 五步都打诊断标记（第 45 轮加）!!
      * 为什么重要：客体**跑在主线程上**，它一旦不返回，屏幕上的字就再也不会更新
@@ -116,45 +129,78 @@ static void guest_main(void) {
      *   上一版恰好把 _init 放在 _init_libc1 前面 —— 于是 _init 里的任何输出
      *   （静态构造很常见）都会去拿还没初始化成递归锁的 libc 锁 → 自锁死 → 卡住。
      *   现在改成：**_init_libc1 最先**，再 _init（C++ 静态构造）。 */
-    if (P->init_libc1) {
-        dm_diag_stage(1, "调用 _init_libc1（libc 锁初始化，必须最先 —— 略过会自锁死）");
-        ((fn0)P->init_libc1)();
-        dm_diag_stage(1, "_init_libc1 已返回");
+    /* !! 顺序照 D2R 的 dm/host/main.c（真机验证过的脚本）!!
+     *   _init_libc0 → nnosInitialize(主线程句柄, 0) → _init_libc1
+     *   → nninitInitializeSdkModule → nninitStartup → _init_libc2
+     *   → 各模块 DT_INIT（全局构造）→ nnMain
+     * 第 52 轮我们踩过的坑：把 `_init`（DT_INIT）放在最前面调 → 它去调
+     * nn::ro::ProtectRelro，而那个函数要读的表是 **rtld 装载时**填的（我们没 rtld）
+     * → 拿偏移当指针 → 段错误。现在 nn::ro 一律走宿主实现（loader.c 的 dm_loader_sym），
+     * 而且顺序也照 D2R 排。 */
+    if (P->init_libc0) {
+        dm_diag_stage(1, "调用 _init_libc0");
+        ((fn0)P->init_libc0)();
+        dm_diag_stage(1, "_init_libc0 已返回");
     } else {
-        dm_diag_stage(1, "**没有 _init_libc1 符号**（计划里是空的）");
-    }
-
-    if (P->init_array) {
-        dm_diag_stage(1, "调用 _init（C++ 静态构造 / __init_array）");
-        ((fn0)P->init_array)();
-        dm_diag_stage(1, "_init 已返回");
-    } else {
-        dm_diag_stage(1, "**没有 _init 符号**（静态构造没人跑）");
+        dm_diag_stage(1, "没有 _init_libc0 符号（跳过）");
     }
 
     if (P->os_initialize) {
-        dm_diag_stage(2, "调用 nnosInitialize（SDK 运行时）");
-        ((fn0)P->os_initialize)();
+        dm_diag_stage(2, "调用 nnosInitialize（SDK 运行时；x0=主线程句柄）");
+        ((fn2)P->os_initialize)((uint64_t)(uintptr_t)g_main_thread_type, 0);
         dm_diag_stage(2, "nnosInitialize 已返回");
     } else {
         dm_diag_stage(2, "**没有 nnosInitialize 符号**");
     }
 
-    if (P->init_startup) {
-        dm_diag_stage(3, "调用 nninitStartup");
-        ((fn0)P->init_startup)();
-        dm_diag_stage(3, "nninitStartup 已返回");
+    if (P->init_libc1) {
+        dm_diag_stage(3, "调用 _init_libc1（libc 锁；略过会在 putc 嵌套加锁时自锁死）");
+        ((fn0)P->init_libc1)();
+        dm_diag_stage(3, "_init_libc1 已返回");
     } else {
-        dm_diag_stage(3, "**没有 nninitStartup 符号**");
+        dm_diag_stage(3, "没有 _init_libc1 符号（跳过）");
+    }
+
+    if (P->sdk_module) {
+        dm_diag_stage(4, "调用 nninitInitializeSdkModule");
+        ((fn0)P->sdk_module)();
+        dm_diag_stage(4, "nninitInitializeSdkModule 已返回");
+    } else {
+        dm_diag_stage(4, "没有 nninitInitializeSdkModule 符号（跳过）");
+    }
+
+    if (P->init_startup) {
+        dm_diag_stage(5, "调用 nninitStartup");
+        ((fn0)P->init_startup)();
+        dm_diag_stage(5, "nninitStartup 已返回");
+    } else {
+        dm_diag_stage(5, "**没有 nninitStartup 符号**");
+    }
+
+    if (P->init_libc2) {
+        dm_diag_stage(6, "调用 _init_libc2");
+        ((fn0)P->init_libc2)();
+        dm_diag_stage(6, "_init_libc2 已返回");
+    } else {
+        dm_diag_stage(6, "没有 _init_libc2 符号（跳过）");
+    }
+
+    /* 各模块的 DT_INIT（全局构造函数）。真机上这一步由 rtld 的回调 B 做；
+       宿主替它做，时机放在 nninitStartup 之后（与 D2R 的 run_module_inits 一致）。 */
+    if (P->init_array) {
+        dm_diag_stage(7, "调用各模块 DT_INIT（全局构造函数）");
+        ((fn0)P->init_array)();
+        dm_diag_stage(7, "DT_INIT 已返回");
+    } else {
+        dm_diag_stage(7, "没有 _init 符号（跳过全局构造）");
     }
 
     if (P->nn_main) {
-        dm_diag_stage(4, "调用 nnMain（客体入口，之后游戏自己跑）");
+        dm_diag_stage(8, "调用 nnMain（客体入口，之后游戏自己跑）");
         ((fn0)P->nn_main)();
-        /* 能走到这一行说明 nnMain **返回**了 —— 对游戏来说这是异常情况 */
-        dm_diag_stage(5, "nnMain 已返回（游戏不该从 nnMain 返回）");
+        dm_diag_stage(9, "nnMain 已返回（游戏不该从 nnMain 返回）");
     } else {
-        dm_diag_stage(4, "**没有 nnMain 符号**");
+        dm_diag_stage(8, "**没有 nnMain 符号**");
     }
 
     /* 客体从 nnMain 返回 = 游戏退出。真机侧这里应当正常退出 App。 */

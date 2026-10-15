@@ -19,6 +19,7 @@
 #include "hle.h"
 #include "loader.h"
 #include "hle_diag.h"    /* 页保护失败时记进诊断日志 */
+#include "hle_nn.h"      /* dm_nn_force_lookup：nn::ro 走宿主实现（见 dm_loader_sym） */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -512,6 +513,17 @@ int dm_loader_finalize(dm_module *m) {
 }
 
 const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *name) {
+    /* !! nn::ro::* 一律走宿主实现，**不要**用客体里那份 !!
+     * 为什么（第 53 轮真机证据）：sdk 自己的 `_init`（DT_INIT）会调 `nn::ro::ProtectRelro`，
+     * 参数来自一张**没有重定位**的表（值是模块内偏移）——那张表是 **rtld 在装载时**填的
+     * （`nn::ro::LoadModule` 的职责）。本工程的宿主不跑 rtld、而是用 HLE 顶掉 nn::ro，
+     * 于是那些字段一直是偏移量 → 客体那份 ProtectRelro 拿偏移当指针 → 0xb85028 段错误。
+     * 宿主这份 `dm_nn_ro_ProtectRelro` 是空实现（RELRO 在我们这里不需要保护），正好合适。
+     * 目前只对 `_ZN2nn2ro` 前缀这么做：范围明确，不动 os/fs 等（那些宿主实现是另一套考虑）。 */
+    if (name && !strncmp(name, "_ZN2nn2ro", 9)) {
+        void *h = dm_nn_force_lookup(name);
+        if (h) return h;
+    }
     /* 与 loader.c 的 module_sym_linear 语义一致：首个「已定义且有名字」的同名符号 */
     for (unsigned i = 0; i < nmods; i++) {
         const dm_module *m = &mods[i];
