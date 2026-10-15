@@ -169,13 +169,15 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         return 0;
     case 0x1a: {  /* ArbitrateLock(w0 持锁者, x1 锁地址, w2 本线程标签) —— 第 55 轮加 */
         volatile uint32_t *w = (volatile uint32_t *)r[DM_REG_X1];
-        uint32_t v = *w;
-        if (v == (uint32_t)r[DM_REG_X0] || v == 0) {
+        uint32_t v = *w, owner = (uint32_t)r[DM_REG_X0];
+        /* 标签字协议（D2R hle_thread.c）：持有者句柄 | 0x40000000(有等待者)。
+           第 56 轮真机：*addr=0x6e808200 vs 期待 0x2e808200 —— 恰好只差等待位，
+           所以「持有者|等待位」也要认。 */
+        if (v == owner || v == (owner | 0x40000000u) || v == 0) {
             *w = (uint32_t)r[DM_REG_X2];   /* 内核语义：等到 *addr==owner 后写入自己的标签 */
             r[DM_REG_X0] = 0;
         } else {
-            /* 标签字协议（D2R hle_thread.c）：持有者句柄 | 0x40000000(有等待者)。
-               单线程引导期 SDK 的用户态 CAS 成功就不会进这里；真争用说明有多线程了，
+            /* 单线程引导期 SDK 的用户态 CAS 成功就不会进这里；真争用说明有多线程了，
                那时必须换成 D2R 的完整等待层。拒答会触发 nn::diag::Abort（本次崩溃链），
                所以记录后放行。 */
             static unsigned n_log;
