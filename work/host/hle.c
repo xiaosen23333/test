@@ -16,6 +16,7 @@
  */
 #include "hle.h"
 #include "hle_diag.h"    /* dm_diag_gate：记下门调用站点（区分「客体自旋」与「死在宿主 HLE」） */
+#include "hle_plat.h"    /* 第 57 轮：堆/线程的平台侧实现（hle_plat_aarch64.c；Windows 有假桩） */
 
 /* MSVC 把 sscanf 标为不安全；这里输入是我们自己产出的 tsv，不需要 _s 版本 */
 #if defined(_MSC_VER)
@@ -142,6 +143,48 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         r[DM_REG_X0] = 0;
         return 0;
     /* ---- 以下全部是「x0 = 结果码、值在 x1..x2」（第 55 轮按 D2R hle_thread.c 核对）---- */
+    case 0x01: {  /* SetHeapSize —— x1=期望大小 → 成功 x1=堆基址（D2R hle_svc.c 0x01）。
+                     失败给可重试的结果码：游戏启动按 2MB 递减重试（main+0x1b66184 同款）。 */
+        uint64_t base = 0;
+        int hrc = dm_plat_heap_set_size(r[DM_REG_X1], &base);
+        if (hrc == 0) { r[DM_REG_X0] = 0; r[DM_REG_X1] = base; }
+        else if (hrc == 1) { r[DM_REG_X0] = 0x10801ull; }   /* ResultLimitReached */
+        else { r[DM_REG_X0] = (uint64_t)-1; }
+        return 0; }
+    case 0x06: {  /* QueryMemory(MemoryInfo* x0, PageInfo* x1, addr x2) —— 第 57 轮加。
+                     SDK 初始化主线程时拿当时的 sp 查询、把回报的整段当主线程栈；
+                     宿主直接穿 x0 指针写 MemoryInfo（D2R hle_svc.c 0x06 同款）。
+                     布局：base(0) size(8) state(0x10) attr(0x14) perm(0x18)。 */
+        uint64_t mi = r[DM_REG_X0], base = 0, size = 0;
+        uint32_t state = 3, perm = 5;
+        if (!dm_boot_query_region(r[DM_REG_X2], &base, &size, &state, &perm)) {
+            base = r[DM_REG_X2] & ~0xFFFull; size = 0x1000;   /* 未知区域：单页 Code 兜底 */
+        }
+        if (mi) {
+            uint64_t *m = (uint64_t *)mi;
+            uint32_t *w = (uint32_t *)mi;
+            m[0] = base; m[1] = size;
+            w[4] = state; w[5] = 0; w[6] = perm; w[7] = 0; w[8] = 0;
+        }
+        r[DM_REG_X0] = 0; r[DM_REG_X1] = 0;    /* x1 → 包装函数写 *PageInfo */
+        return 0; }
+    case 0x08: {  /* CreateThread(→w1 句柄; x1 入口, x2 参数, x3 栈顶, w4 优先级, w5 核) */
+        uint64_t handle = 0;
+        if (dm_plat_thread_create(r[DM_REG_X1], r[DM_REG_X2], r[DM_REG_X3],
+                                  r[DM_REG_X4], r[DM_REG_X5], &handle) == 0) {
+            r[DM_REG_X0] = 0; r[DM_REG_X1] = handle;
+        } else {
+            r[DM_REG_X0] = 0xCE01ull;          /* ResultOutOfResource */
+        }
+        return 0; }
+    case 0x09: {  /* StartThread(w0 句柄) */
+        dm_plat_thread_start(r[DM_REG_X0]);
+        r[DM_REG_X0] = 0;
+        return 0; }
+    case 0x0a:    /* ExitThread()：终止当前宿主 pthread（不返回；Windows 桩为空） */
+        dm_plat_thread_exit();
+        r[DM_REG_X0] = 0;
+        return 0;
     case 0x0c:  /* GetThreadPriority(句柄) —— x1 = 优先级 */
         r[DM_REG_X0] = 0; r[DM_REG_X1] = 0x2C;
         return 0;
@@ -230,11 +273,30 @@ void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs) {
             /* 实现已写好内容。若该调用的 x0 是「结果码」，成功时置 0；
                若是「返回值」（如 GetSystemTick），保留实现写的数据。 */
             if (x0_is_result_code(e->arg)) regs[DM_REG_X0] = 0;
-            return;
+        } else {
+            /* 未实现的调用：给一个「未实现」的结果码（x0 非 0），
+               避免客体把垃圾当成有效句柄继续用。诊断里计数。 */
+            regs[DM_REG_X0] = (uint64_t)-1;
         }
-        /* 未实现的调用：给一个「未实现」的结果码（x0 非 0），
-           避免客体把垃圾当成有效句柄继续用。诊断里计数。 */
-        regs[DM_REG_X0] = (uint64_t)-1;
+        /* 第 57 轮：svc 分发诊断（限频）—— 真机日志直接点名
+           「哪个 svc 被调、实现没、x0 出了什么」。
+           起因：r56 卡死在 ThreadManagerImplByHorizon 构造，真凶是
+           svc 6 QueryMemory 未实现 —— 之前只能靠反汇编猜。 */
+        {
+            static unsigned n_svc_diag;
+            if (n_svc_diag < 60) {
+                n_svc_diag++;
+                char nm[40];
+                if (rc == 0 && x0_is_result_code(e->arg) && regs[DM_REG_X0] == 0)
+                    dm_diag_mark("[svc] %u (%s) 成功 x1=%llx", e->arg,
+                                 dm_diag_addr(ret, nm, (int)sizeof nm) ? nm : "?",
+                                 (unsigned long long)regs[DM_REG_X1]);
+                else
+                    dm_diag_mark("[svc] %u (%s) rc=%d x0出=%llx", e->arg,
+                                 dm_diag_addr(ret, nm, (int)sizeof nm) ? nm : "?",
+                                 rc, (unsigned long long)regs[DM_REG_X0]);
+            }
+        }
         return;
     }
 

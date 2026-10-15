@@ -254,6 +254,99 @@ void dm_plat_tls_install(void) {
 int dm_plat_tls_install_count(void) { return g_tls_installs; }
 
 
+/* ---------------- ⑤ 客体堆（svc 1 SetHeapSize，第 57 轮加；D2R hle_svc.c 0x01 同语义） -----
+ *
+ * Horizon ABI：x1 = 期望大小；成功 x1 = 堆基址、x0 = 0。
+ * 做法与 D2R 一致：预留应用内存池（Switch 4GB 机型给应用 3285MB），SetHeapSize 只
+ * 记账返回基址 —— vm_allocate 预留的地址空间未触碰不提交物理页，无需 mprotect 游戏。
+ */
+#include <mach/mach.h>
+#include <mach/vm_map.h>
+#include <pthread.h>
+#include <sched.h>
+
+#define DM_APP_POOL  (3285ull << 20)      /* 应用内存池 3285 MB */
+static uint8_t *g_heap;
+static uint64_t g_heap_cap;
+
+int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
+    if (!g_heap) {
+        vm_address_t addr = 0;
+        kern_return_t kr = vm_allocate(mach_task_self(), &addr, DM_APP_POOL, VM_FLAGS_ANYWHERE);
+        if (kr != KERN_SUCCESS) {
+            dm_diag_mark("SetHeapSize：预留 %llu MB 失败 kr=%d", DM_APP_POOL >> 20, kr);
+            return -1;
+        }
+        g_heap = (uint8_t *)addr;
+        g_heap_cap = DM_APP_POOL;
+        dm_diag_mark("客体堆：预留 %llu MB @ %p", DM_APP_POOL >> 20, g_heap);
+    }
+    if (size > g_heap_cap) return 1;      /* ResultLimitReached —— 游戏会按 2MB 递减重试 */
+    if (base_out) *base_out = (uint64_t)g_heap;
+    return 0;
+}
+
+/* ---------------- ⑥ 客体线程（svc 8/9/0A，第 57 轮加；D2R hle_thread.c 同语义） -----------
+ *
+ * Horizon ABI：CreateThread(→w1 句柄; x1 入口, x2 参数, x3 栈顶, w4 优先级, w5 核)
+ *              StartThread(w0 句柄) / ExitThread()
+ * 每个客体线程 = 一个宿主 pthread：先装本线程的 4 个槽（dm_plat_tls_install 本来就是
+ * 每线程一套 calloc 的 TLS/TLR），等 StartThread 放行，再切栈进客体入口。
+ */
+#define DM_NTHR 64
+typedef struct {
+    int used, started;
+    uint64_t entry, arg, sp;
+    pthread_t pt;
+} dm_thr;
+static dm_thr g_thrs[DM_NTHR];
+static pthread_mutex_t g_thr_lock = PTHREAD_MUTEX_INITIALIZER;
+
+extern void dm_thread_enter_asm(void *entry, void *arg, void *sp);   /* entry.S */
+extern void dm_thread_returned(void);                                /* 本文件 ② */
+
+static void *dm_thr_trampoline(void *p) {
+    dm_thr *t = p;
+    dm_plat_tls_install();                     /* 本线程的 TLS/TLR/门槽（+TLR+0x1F0/0x1F8） */
+    while (!__atomic_load_n(&t->started, __ATOMIC_ACQUIRE)) sched_yield();
+    dm_thread_enter_asm((void *)t->entry, (void *)t->arg, (void *)t->sp);
+    dm_thread_returned();                      /* 客体入口不许返回 */
+    return NULL;
+}
+
+int dm_plat_thread_create(uint64_t entry, uint64_t arg, uint64_t sp,
+                          uint64_t prio, uint64_t core, uint64_t *handle_out) {
+    (void)prio; (void)core;                    /* 宿主只记账，不排核 */
+    pthread_mutex_lock(&g_thr_lock);
+    int idx = -1;
+    for (int i = 0; i < DM_NTHR; i++) if (!g_thrs[i].used) { idx = i; break; }
+    if (idx >= 0) {
+        dm_thr *t = &g_thrs[idx];
+        t->used = 1; t->started = 0;
+        t->entry = entry; t->arg = arg; t->sp = sp;
+        if (pthread_create(&t->pt, NULL, dm_thr_trampoline, t) != 0) {
+            t->used = 0;
+            idx = -1;
+        }
+    }
+    pthread_mutex_unlock(&g_thr_lock);
+    if (idx < 0) {
+        dm_diag_mark("CreateThread：线程表满/创建失败");
+        return -1;
+    }
+    if (handle_out) *handle_out = 0x1001ull + (uint64_t)idx;   /* D2R 句柄 0x1001 起 */
+    return 0;
+}
+
+void dm_plat_thread_start(uint64_t handle) {
+    if (handle < 0x1001ull || handle >= 0x1001ull + DM_NTHR) return;
+    __atomic_store_n(&g_thrs[handle - 0x1001ull].started, 1, __ATOMIC_RELEASE);
+}
+
+void dm_plat_thread_exit(void) {
+    pthread_exit(NULL);                        /* 不返回（D2R thread_exit 同款） */
+}
+
 /* ---------------- ② 客体线程从入口返回 ---------------- */
 /* Horizon 的线程必须经 nn::os::ExitThread 退出；入口函数返回就是 bug。
  * 这里如实报告（而不是静默把线程收掉）—— 静默会让「客体逻辑错」变成一个查不到的谜。 */

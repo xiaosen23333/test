@@ -30,11 +30,36 @@ int  dm_plat_tls_install_count(void);
  * 只做读 + 手写格式化 + write(2)，信号处理安全。 */
 void dm_plat_dump_slots_crash(void);
 
+/* ---- 客体线程与堆（第 57 轮加，svc 1/8/9/0A 用；照 D2R hle_svc.c / hle_thread.c 语义）---- */
+
+/* SetHeapSize：预留/扩出客体堆。size = 期望字节数；成功 *base_out = 堆基址。
+ * 返回 0 = 成功；1 = 超出应用内存池（ResultLimitReached）；-1 = 分配失败。 */
+int  dm_plat_heap_set_size(uint64_t size, uint64_t *base_out);
+
+/* CreateThread：建宿主 pthread（跑 trampoline：装线程槽 → 等 StartThread → 切栈进客体）。
+ * 成功返回 0 并写 *handle_out（0x1001 起）。prio/core 目前只记账。 */
+int  dm_plat_thread_create(uint64_t entry, uint64_t arg, uint64_t sp,
+                           uint64_t prio, uint64_t core, uint64_t *handle_out);
+/* StartThread：放行等待中的线程入口。 */
+void dm_plat_thread_start(uint64_t handle);
+/* ExitThread：终止当前宿主 pthread（不返回）。 */
+void dm_plat_thread_exit(void);
+
 #endif /* aarch64 */
 
-/* 非 aarch64 目标给空实现，调用点不用包 #if */
+/* 非 aarch64 目标给空/假实现，调用点不用包 #if。
+ * MSVC 的 C 模式对 inline 支持不稳，直接用 static（未用会有警告但不报错）。 */
 #if !defined(__aarch64__) && !defined(_M_ARM64)
-static inline void dm_plat_dump_slots_crash(void) { }
+static void dm_plat_dump_slots_crash(void) { }
+static int  dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
+    (void)size; if (base_out) *base_out = 0x10000000ull; return 0;   /* 自测用假堆 */
+}
+static int  dm_plat_thread_create(uint64_t e, uint64_t a, uint64_t s,
+                                  uint64_t p, uint64_t c, uint64_t *h) {
+    (void)e; (void)a; (void)s; (void)p; (void)c; if (h) *h = 0; return -1;   /* Windows 不建线程 */
+}
+static void dm_plat_thread_start(uint64_t handle) { (void)handle; }
+static void dm_plat_thread_exit(void) { }
 #endif
 
 #endif /* DM_HLE_PLAT_H */

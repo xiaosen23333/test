@@ -269,6 +269,10 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
         g_boot_info.ngates = (unsigned)ntot;
     }
 
+    /* 客体地址空间区域查询（第 57 轮加，svc 6 QueryMemory 用）：
+     * 见文件后部的 dm_boot_query_region —— 需要在这里之外访问 g_ctx 与栈区间，
+     * 所以做成独立函数（hle.c 的 host_svc_impl 调）。 */
+
     /* RomFS 根（nn::fs 的路径映射用） */
     dm_nn_fs_set_romfs_root(g_romfs);
     if (g_save[0]) dm_nn_fs2_set_save_root(g_save);
@@ -332,6 +336,44 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
     dm_diag_mark("装载完成（客体入口 %s）", g_guest_entry ? "已解析" : "**没解析到**");
 
     g_booted = 1;
+    return 0;
+}
+
+/* ---------------- 客体地址空间区域查询（第 57 轮，svc 6 QueryMemory 用） ----------------
+ *
+ * SDK 初始化主线程记录时拿当时的 sp 查 QueryMemory、把回报的整段当主线程栈；
+ * 之后找内存空位也靠它。我们客体地址空间里的已知区域 = 5 个模块 + 客体主线程栈。
+ * 返回 1 = 命中；0 = 未知（调用方给「单页 Code」兜底，D2R hle_svc.c 同款）。
+ * state/perm 取值 = Horizon MemoryInfo：Code=3(R-X)、Stack=0xB(RW)、Heap=5(RW)。 */
+#if !defined(__aarch64__) && !defined(_M_ARM64)
+/* Windows 自测不编 hle_nvn_guest.c：给个空区间（dm_boot_query_region 只查模块） */
+void dm_guest_stack_range(void **base, size_t *size) { if (base) *base = 0; if (size) *size = 0; }
+#endif
+int dm_boot_query_region(uint64_t addr, uint64_t *base, uint64_t *size,
+                         uint32_t *state, uint32_t *perm) {
+    extern void dm_guest_stack_range(void **base, size_t *size);   /* hle_nvn_guest.c */
+    for (unsigned i = 0; i < g_ctx.nmods; i++) {
+        const dm_module *m = &g_ctx.mods[i];
+        if (addr >= m->base && addr < m->base + m->size) {
+            if (base) *base = m->base;
+            if (size) *size = m->size;
+            if (state) *state = 3;   /* Code */
+            if (perm)  *perm  = 5;   /* R-X */
+            return 1;
+        }
+    }
+    {
+        void *sb = NULL; size_t ssz = 0;
+        dm_guest_stack_range(&sb, &ssz);
+        if (sb && ssz && addr >= (uint64_t)sb && addr < (uint64_t)sb + ssz) {
+            if (base) *base = (uint64_t)sb;
+            if (size) *size = ssz;
+            if (state) *state = 0xB;  /* Stack —— 整段回报（D2R 的教训：回报一页会让
+                                         之后的栈断言随宿主环境偶发失败） */
+            if (perm)  *perm  = 3;    /* RW */
+            return 1;
+        }
+    }
     return 0;
 }
 

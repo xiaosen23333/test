@@ -22,6 +22,9 @@
 #define DM_REG_X0    0
 #define DM_REG_X1    1
 #define DM_REG_X2    2
+#define DM_REG_X3    3
+#define DM_REG_X4    4
+#define DM_REG_X5    5
 #define DM_REG_X8    8
 #define DM_REG_X29   29
 #define DM_REG_X30   30
@@ -62,6 +65,11 @@ int dm_host_load_gates(dm_host *h, dm_gate_ent *table, size_t cap, const char *p
 
 /* 按返回点二分查找。返回 NULL 表示该返回点未登记。 */
 const dm_gate_ent *dm_host_find(const dm_host *h, uint64_t ret);
+
+/* 客体地址空间区域查询（hle_nvn_boot.c 实现，svc 6 QueryMemory 用；第 57 轮加）。
+ * 返回 1 = 命中（base/size/state/perm 填好），0 = 未知区域。 */
+int dm_boot_query_region(uint64_t addr, uint64_t *base, uint64_t *size,
+                         uint32_t *state, uint32_t *perm);
 
 /* 门分发入口 —— _dm_gate 调用它（x0=ret, x1=regs）。 */
 void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs);

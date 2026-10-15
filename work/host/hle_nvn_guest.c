@@ -213,6 +213,14 @@ static void guest_main(void) {
     fprintf(stderr, "[dm] nnMain 返回了（游戏应当是自己退出的）\n");
 }
 
+/* 客体主线程栈区间（svc 6 QueryMemory 用，第 57 轮加）：
+ * SDK 初始化主线程记录时拿当时的 sp 查 QueryMemory，把回报的整段当主线程栈
+ * （D2R hle_svc.c 的同款语义）。 */
+void dm_guest_stack_range(void **base, size_t *size) {
+    if (base) *base = g_guest_stack;
+    if (size) *size = DM_GUEST_STACK_SIZE;
+}
+
 /* 由 hle_nvn_boot.c 的 dm_host_frame 调用（aarch64 分支） */
 void dm_host_enter_guest(void) {
     static int entered = 0;
@@ -252,5 +260,6 @@ void dm_host_enter_guest(void) {
 
 /* 空实现，避免链接期找不到符号（Windows 自测里 hle_nvn_boot.c 不会调它） */
 void dm_host_enter_guest(void) { }
+void dm_guest_stack_range(void **base, size_t *size) { if (base) *base = 0; if (size) *size = 0; }
 
 #endif
