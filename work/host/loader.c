@@ -449,12 +449,12 @@ int dm_loader_exec_selftest(void) {
   }
 #endif
 
-int dm_loader_query_prot(const dm_module *m, char *out, int n) {
+int dm_loader_query_prot_at(const dm_module *m, uint64_t off, char *out, int n) {
     if (!out || n < 5) return -1;
     out[0] = '?'; out[1] = 0;
 #if defined(__APPLE__)
     unsigned prot = 0;
-    if (darwin_vm_prot((uintptr_t)m->base, &prot) == 0) {
+    if (darwin_vm_prot((uintptr_t)m->base + (uintptr_t)off, &prot) == 0) {
         int k = 0;
         if (prot & 1) out[k++] = 'R';
         if (prot & 2) out[k++] = 'W';
@@ -465,11 +465,67 @@ int dm_loader_query_prot(const dm_module *m, char *out, int n) {
     }
     return -2;
 #else
-    (void)m;
+    (void)m; (void)off;
     return -1;      /* 非 Apple：不支持（Windows 自测里不查） */
 #endif
 }
 
+/* 首页的特例（旧接口保持兼容） */
+int dm_loader_query_prot(const dm_module *m, char *out, int n) {
+    return dm_loader_query_prot_at(m, 0, out, n);
+}
+
+
+/* ---------------- 页保护区间换算（第 70 轮抽出：finalize 与自测共用） --------
+ *
+ * 把模块的 6 个保护区间换算成**页对齐**的实际保护区间 —— **只保护完整落入的页**
+ * （起点向上取整、终点向下取整）。边界页一律不碰、保持 vm_remap 的默认权限。
+ *
+ * !! 为什么必须向内取整（真机 .ips 实证：CODESIGNING / Invalid Page）!!
+ *   页大小 16K，而模块段边界（TEXT_END/RO_OFF/patch...）不是 16K 对齐的 ——
+ *   相邻两个区间会共享「边界页」。原来向外取整（起点下取整、终点上取整）时，
+ *   后写的区间把先写的覆盖掉：
+ *     · rtld：代码 [0,0x3000) 与 rodata [0x3000,0x4000) 同在 16K 第 0 页，
+ *       rodata 的 R 把代码页压成 r-- → 第 7 步执行 DT_INIT（rtld+0x1d40，
+ *       就在这页）时被 iOS 的代码签名保护直接杀（SIGKILL，我们的崩溃处理
+ *       都来不及跑，屏幕日志停在「全局构造：rtld DT_INIT > …」）；
+ *     · rtld 的补丁页被「映像尾 R+W」压成 rw-（改写器桩不可执行）；
+ *     · sdk/main 各有一个代码尾页被 rodata 的 R 压成 r--（潜在雷）。
+ *   向内取整后：区间本就不相交 ⇒ 覆盖的页也互不重叠 ⇒ 不再互相覆盖；
+ *   边界页保持三块 remap 的默认权限（代码块 r-x / 可写块 rw- / 补丁块 r-x）。
+ *
+ * 默认权限哪来的：三块 remap 的源节在**会被签名的** Guest.framework/Guest 里，
+ * __TEXT 段 initprot=maxprot=R|X（guest_dylib.py prot=5）⇒ 代码/补丁块默认 r-x；
+ * __DM<i>W 段 prot=3 ⇒ 可写块默认 rw-。边界页保持默认即可执行。 */
+int dm_loader_prot_spans(const dm_module *m, uint64_t page, dm_prot_span *out, int cap) {
+    const dm_layout *L = &m->L;
+    static const int want[6] = {
+        DM_PROT_R | DM_PROT_X,   /* 代码段 */
+        DM_PROT_R,               /* rodata */
+        DM_PROT_R | DM_PROT_W,   /* data */
+        DM_PROT_R | DM_PROT_W,   /* 键页：读写 */
+        DM_PROT_R | DM_PROT_X,   /* 改写器补丁区：可执行 */
+        DM_PROT_R | DM_PROT_W,   /* 映像尾 */
+    };
+    uint64_t seg[6][2] = {
+        { 0,                          L->ro_off },
+        { L->ro_off,                  L->data_off },
+        { L->data_off,                L->key_page_off },
+        { L->key_page_off,            L->key_page_off + L->key_page_size },
+        { L->patch_off,               L->patch_off + L->patch_len },
+        { L->patch_off + L->patch_len, L->image_size },
+    };
+    int n = 0;
+    for (int i = 0; i < 6; i++) {
+        uint64_t off = seg[i][0], end = seg[i][1];
+        if (end <= off) continue;                       /* 空区间（如没有键页） */
+        uint64_t a = (off + page - 1) & ~(page - 1);    /* 起点向上取整 */
+        uint64_t e = end & ~(page - 1);                 /* 终点向下取整 */
+        if (e <= a) continue;                           /* 不含完整页 ⇒ 边界页，跳过 */
+        if (n < cap) { out[n].off = a; out[n].end = e; out[n].prot = want[i]; n++; }
+    }
+    return n;
+}
 
 /* ---------------- 页保护（第 48 轮加 —— 真机「第一条客体指令就没了」的真因） --------
  *
@@ -488,33 +544,18 @@ int dm_loader_finalize(dm_module *m) {
     uintptr_t base = (uintptr_t)m->base;
     int fails = 0;
 
-#define DM_PROT_RANGE(off, end, prot)                                            \
-    do {                                                                         \
-        uintptr_t a = (base + (uintptr_t)(off)) & ~(uintptr_t)(ps - 1);           \
-        uintptr_t e = (base + (uintptr_t)(end) + ps - 1) & ~(uintptr_t)(ps - 1);  \
-        if (e > a && os_protect((void *)a, e - a, (prot)) != 0) {                 \
-            fails++;                                                             \
-            dm_diag_mark("页保护失败：%s [%#llx,%#llx) prot=%d", m->name,          \
-                         (unsigned long long)(off), (unsigned long long)(end),   \
-                         (prot));                                                \
-        }                                                                        \
-    } while (0)
-
-    DM_PROT_RANGE(0, m->L.ro_off, DM_PROT_R | DM_PROT_X);            /* 代码段 */
-    if (m->L.data_off > m->L.ro_off)
-        DM_PROT_RANGE(m->L.ro_off, m->L.data_off, DM_PROT_R);        /* rodata */
-    if (m->L.key_page_off > m->L.data_off)
-        DM_PROT_RANGE(m->L.data_off, m->L.key_page_off, DM_PROT_R | DM_PROT_W);
-    if (m->L.key_page_size)
-        DM_PROT_RANGE(m->L.key_page_off, m->L.key_page_off + m->L.key_page_size,
-                      DM_PROT_R | DM_PROT_W);                        /* 键页：读写 */
-    if (m->L.patch_len)
-        DM_PROT_RANGE(m->L.patch_off, m->L.patch_off + m->L.patch_len,
-                      DM_PROT_R | DM_PROT_X);                        /* 补丁区：可执行 */
-    if (m->size > m->L.patch_off + m->L.patch_len)
-        DM_PROT_RANGE(m->L.patch_off + m->L.patch_len, m->size, DM_PROT_R | DM_PROT_W);
-
-#undef DM_PROT_RANGE
+    /* 区间 → 页 的换算统一在 dm_loader_prot_spans 里（自测也用它跑同一份逻辑）。 */
+    dm_prot_span spans[8];
+    int n = dm_loader_prot_spans(m, (uint64_t)ps, spans, 8);
+    for (int i = 0; i < n; i++) {
+        if (os_protect((void *)(base + spans[i].off),
+                       (size_t)(spans[i].end - spans[i].off), spans[i].prot) != 0) {
+            fails++;
+            dm_diag_mark("页保护失败：%s [%#llx,%#llx) prot=%d", m->name,
+                         (unsigned long long)spans[i].off,
+                         (unsigned long long)spans[i].end, spans[i].prot);
+        }
+    }
     return fails;
 }
 

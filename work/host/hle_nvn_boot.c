@@ -236,12 +236,21 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
      * 现在改成 D2R 的做法（已签名的 dylib + vm_remap，见 dm_loader_map_embedded），
      * 所以这条自检留在 loader.c 里当"探针"，**不在正常启动路径上调用**。 */
 
-    /* 顺便问内核：各模块代码页**实际**的保护位（不是我们以为设了什么） */
+    /* 顺便问内核：各模块代码页**实际**的保护位（不是我们以为设了什么）。
+     * 第 70 轮扩展成三个点：首页 / 代码尾页（text_end-1 所在页）/ 补丁页 ——
+     * 后两个正是「边界页被相邻区间覆盖」事故的现场（.ips: CODESIGNING /
+     * Invalid Page；rtld 的 DT_INIT 就死在代码尾页上）。三处都必须含 X。 */
     for (unsigned i = 0; i < g_ctx.nmods; i++) {
-        char pr[8];
-        int qrc = dm_loader_query_prot(&g_ctx.mods[i], pr, (int)sizeof pr);
-        dm_diag_mark("代码页实际保护 %s = %s（查询 rc=%d）",
-                     g_ctx.mods[i].name, (qrc == 0) ? pr : "?", qrc);
+        const dm_module *mm = &g_ctx.mods[i];
+        char p0[8], pt[8], pp[8];
+        int r0 = dm_loader_query_prot_at(mm, 0, p0, (int)sizeof p0);
+        int rt = dm_loader_query_prot_at(mm, mm->L.text_end ? mm->L.text_end - 1 : 0,
+                                         pt, (int)sizeof pt);
+        int rp = dm_loader_query_prot_at(mm, mm->L.patch_off, pp, (int)sizeof pp);
+        dm_diag_mark("代码页实际保护 %s = 首页 %s / 代码尾 %s / 补丁 %s（均需含 X）rc %d,%d,%d",
+                     mm->name,
+                     (r0 == 0) ? p0 : "?", (rt == 0) ? pt : "?", (rp == 0) ? pp : "?",
+                     r0, rt, rp);
     }
     g_boot_info.n_tlsdesc = (unsigned)tot.n_tlsdesc;
     g_boot_info.nunres   = tot.n_unresolved;

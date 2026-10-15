@@ -9,6 +9,8 @@
  *   4. 未解析符号只有 glslc*（8 个）
  *   5. 键页填充后 4 项都是「键号 × 8」
  *   6. gates.tsv 登记进 hle.c 的门表，且按返回点有序
+ *   7. 页保护区间换算（16K 页、向内取整）：页两两不重叠；
+ *      首页/代码尾页/补丁页不得被**不含 X** 的区间覆盖（第 70 轮回归断言）
  */
 #include "../hle.h"
 #include "../loader.h"
@@ -170,8 +172,43 @@ int main(int argc, char **argv) {
         if ((unsigned)n != m->L.ngates) gt_ok = 0;
     }
 
+    printf("\n=== 7) page-protection spans (16K pages, inward rounding) ===\n");
+    fflush(stdout);
+    /* 第 70 轮回归断言。背景：真机 .ips = CODESIGNING / Invalid Page ——
+     * 16K 页与「非 16K 对齐的段边界」会让相邻区间共享边界页，向外取整时
+     * 后写的覆盖先写的（rtld 代码页被 rodata 压成 r--）。这里对**真实模块布局**
+     * 断言两条：
+     *   ① 区间换算出的页两两不重叠（不再互相覆盖）；
+     *   ② 「必须可执行」的三页（首页/代码尾页/补丁页）不得落在任何**不含 X** 的区间里。 */
+    int pp_ok = 1;
+    for (unsigned i = 0; i < ctx.nmods; i++) {
+        dm_module *m = &ctx.mods[i];
+        dm_prot_span sp[8];
+        int n = dm_loader_prot_spans(m, 0x4000, sp, 8);   /* iOS 真机页大小 */
+        int overlap = 0;
+        for (int a = 0; a < n; a++)
+            for (int b = a + 1; b < n; b++)
+                if (sp[a].off < sp[b].end && sp[b].off < sp[a].end) overlap = 1;
+        uint64_t mustx[3];
+        mustx[0] = 0;
+        mustx[1] = (m->L.text_end ? (m->L.text_end - 1) : 0) & ~(uint64_t)0x3FFF;
+        mustx[2] = m->L.patch_off & ~(uint64_t)0x3FFF;
+        int xbad = 0;
+        for (int k = 0; k < 3; k++)
+            for (int a = 0; a < n; a++)
+                if (mustx[k] >= sp[a].off && mustx[k] < sp[a].end && !(sp[a].prot & DM_PROT_X))
+                    xbad = 1;
+        pp_ok = pp_ok && !overlap && !xbad;
+        printf("  [%u] %-14s spans=%d  overlap=%s  xbad=%s\n", i, m->name, n,
+               overlap ? "YES" : "no", xbad ? "YES" : "no");
+        for (int a = 0; a < n; a++)
+            printf("        [%#010llx, %#010llx) prot=%d\n",
+                   (unsigned long long)sp[a].off, (unsigned long long)sp[a].end, sp[a].prot);
+        fflush(stdout);
+    }
+
     printf("\n=== result: %s ===\n",
-           (tot.n_bad_sym == 0 && kp_ok && gt_ok && tot.n_unresolved <= 27) ? "ALL PASS" : "CHECK FAILED");
+           (tot.n_bad_sym == 0 && kp_ok && gt_ok && pp_ok && tot.n_unresolved <= 27) ? "ALL PASS" : "CHECK FAILED");
     /* 注意：模块映像是 os_map()（Windows 上是 VirtualAlloc）分配的，
        必须用 os_unmap 释放 —— 用 free() 会访问违例（这里踩过）。
        自测里其实不必释放（进程马上退出），但显式释放能顺带验证映射成对。 */

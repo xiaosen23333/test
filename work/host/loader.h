@@ -121,6 +121,26 @@ uint64_t dm_tlsdesc_resolver(uint64_t *desc);
  *   **改写器补丁区** [PATCH_OFF, +LEN) → R+X   ← 客体的改写代码全在这儿
  * 返回 0 表示全部成功；>0 = 失败的区段数（失败原因由 loader.c 记进诊断日志）。 */
 int dm_loader_finalize(dm_module *m);
+
+/* 第 70 轮：模块页保护的「区间 → 页」换算（finalize 与自测共用同一份逻辑）。
+ * 只保护**完整落入**区间的页（起点向上取整、终点向下取整）——
+ * 边界页不碰，保持 vm_remap 的默认权限。
+ *
+ * 为什么必须向内取整（真机 .ips 实证：CODESIGNING / Invalid Page）：
+ *   页大小 16K，而模块段边界（TEXT_END/RO_OFF/...）不是 16K 对齐的，
+ *   相邻两个区间会共享「边界页」。向外取整时后写的把先写的覆盖：
+ *   rtld 的代码段 [0,0x3000) 与 rodata [0x3000,0x4000) 同在 16K 第 0 页，
+ *   rodata 的 R 把代码页压成 r-- → 第 7 步执行 rtld 的 DT_INIT（rtld+0x1d40，
+ *   就在这页）时被 iOS 的代码签名保护直接杀掉（SIGKILL，连崩溃行都留不下）。
+ *   rtld 的补丁页、sdk/main 的代码尾页也被同一问题降级过。
+ * 向内取整后各区间覆盖的页互不重叠（区间本身互不相交），
+ * 边界页保持三块 remap 的默认权限（代码块 r-x / 可写块 rw- / 补丁块 r-x）。 */
+typedef struct { uint64_t off, end; int prot; } dm_prot_span;
+int dm_loader_prot_spans(const dm_module *m, uint64_t page, dm_prot_span *out, int cap);
+
+/* 第 70 轮：查模块内**某个偏移所在页**的实际保护位（dm_loader_query_prot 是它的
+ * off=0 特例）。给启动时的「首页 / 代码尾页 / 补丁页」三处体检用 —— 那三处都必须含 X。 */
+int dm_loader_query_prot_at(const dm_module *m, uint64_t off, char *out, int n);
 /* 第 61 轮：把 .init_array 条目加上模块基址（必须在 finalize 之前、relocate 之后调）。
  * 背景：本游戏 SDK 的 init_array 与 nn::sf 服务描述表没有 RELATIVE 重定位条目，
  * 真机由 rtld 按「基址相对」约定处理；我们不补的话 SDK 一用就是裸偏移。 */
