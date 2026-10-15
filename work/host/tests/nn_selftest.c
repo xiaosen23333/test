@@ -9,6 +9,16 @@ extern unsigned dm_nn_expect_count(void);
 extern const char *dm_nn_expect_name(unsigned i);
 extern const void *dm_nn_fs_stats_ptr(void);
 
+/* nn::fs 的几个函数（hle_nn_fs.c 没有配套头文件，只能就地声明）。
+ * !! 必须放在**第一次使用之前** —— 第 44 轮修正：
+ *   原来这几个声明零散写在各自的使用点旁边（第 200 多行），而调用在第 100 多行。
+ *   MSVC 对「先调用、后声明」只报 C4013 警告并假定返回 int（因此 Windows 上一直没暴露），
+ *   但 clang 16 起这是**硬错误**。由 work/porting/check_use_before_decl.py 扫出来的。 */
+extern void dm_nn_fs_set_romfs_root(const char *);
+extern int  dm_nn_fs_OpenFile(void *, const char *, int);
+extern int  dm_nn_fs_CloseFile(uint64_t);
+extern int  dm_nn_fs_ReadFile(uint64_t *, uint64_t, int64_t, void *, uint64_t);
+
 static int g_thread_ran = 0;
 /* 注意：MSVC 不支持嵌套函数，线程体必须放在文件作用域 */
 static void thr_body(void *arg) { (void)arg; g_thread_ran = 1; }
@@ -219,7 +229,6 @@ int main(int argc, char **argv) {
         extern int  dm_nn_fs2_MountSaveData(const char *, const void *);
         extern int  dm_nn_fs2_CommitSaveData(const char *);
         extern int  dm_nn_fs2_GetSaveDataSizeMax(int64_t *, int64_t *);
-        extern void dm_nn_fs_set_romfs_root(const char *);
 
         /* 存档根目录设在宿主临时目录下 */
         char save_root[1024];
@@ -250,12 +259,10 @@ int main(int argc, char **argv) {
         const char *sf = "/save/selftest.bin";
         int cf = dm_nn_fs2_CreateFile(sf, 16);
         uint64_t wh = 0;
-        extern int dm_nn_fs_OpenFile(void *, const char *, int);
         int of = dm_nn_fs_OpenFile(&wh, sf, 2 /*写*/);
         const char payload[] = "DM-HELLO-SAVE!!";
         uint64_t wrote = 0;
         int wr = dm_nn_fs2_WriteFile(&wrote, wh, 0, payload, sizeof payload, NULL);
-        extern int dm_nn_fs_CloseFile(uint64_t);
         dm_nn_fs_CloseFile(wh);
         printf("  CreateFile/OpenFile(写)/WriteFile -> cf=%d of=%d wr=%d wrote=%llu\n",
                cf, of, wr, (unsigned long long)wrote);
@@ -265,7 +272,6 @@ int main(int argc, char **argv) {
         int ro = dm_nn_fs_OpenFile(&rh, sf, 1);
         char back[32] = {0};
         uint64_t got2 = 0;
-        extern int dm_nn_fs_ReadFile(uint64_t *, uint64_t, int64_t, void *, uint64_t);
         dm_nn_fs_ReadFile(&got2, rh, 0, back, sizeof back - 1);
         dm_nn_fs_CloseFile(rh);
         printf("  读回: rc=%d got=%llu 内容=\"%s\"  %s\n", ro, (unsigned long long)got2, back,

@@ -3,11 +3,22 @@
  * !! 只能在 macOS + Xcode 上编译 !!  Windows 上无法验证，故逻辑刻意保持最简。
  *
  * 与宿主的分工：宿主（work/host/）负责客体的一切；本文件只做「iOS 才有的事」。
- * 启动顺序（顺序有依赖，不要调换）：
- *   1. 建 Documents 目录（RomFS 与存档都放这里）
- *   2. dm_ios_start() -> 宿主装载 5 个模块、填键页、登记门
- *   3. UIApplicationMain -> 起界面与 Metal 层
- *   4. viewDidAppear 起帧循环
+ *
+ * ============================================================================
+ * !! 第 43 轮修正 —— 黑屏的两个原因（都在这个文件/配对文件里）!!
+ *
+ * 【原因 1】窗口从来没建过
+ *   原来这里只写了 @property UIWindow *window; 而**没有任何代码创建它**。
+ *   于是 rootViewController 为 nil → front_ios.m 里的 DmVC 永不加载 → 黑屏。
+ *
+ * 【原因 2】装载同步跑在 didFinishLaunching 里
+ *   dm_ios_start() 要装载 5 个模块（36 MB）+ 24,660 条重定位。
+ *   这些在主线程上做会拖住启动，iOS 的看门狗（约 20 秒）会杀进程。
+ *
+ * 现在：先建窗口让界面可见（用户立刻看到状态文字），装载放后台线程。
+ * 具体做法都在 front_ios.m 的 dm_ios_make_window() / dm_ios_boot_async() 里 ——
+ * 本文件不掺和 UI 细节，只按顺序调它们。
+ * ============================================================================
  */
 #import <UIKit/UIKit.h>
 
@@ -17,6 +28,8 @@ extern void dm_ios_enter_background(void);
 extern void dm_ios_enter_foreground(void);
 extern void dm_ios_memory_warning(void);
 extern void dm_host_shutdown(void);
+extern UIWindow *dm_ios_make_window(void);      /* 建窗口 + 起 DmVC */
+extern void      dm_ios_boot_async(void);       /* 后台装载 */
 
 @interface DmAppDelegate : UIResponder <UIApplicationDelegate>
 @property (nonatomic, strong) UIWindow *window;
@@ -27,25 +40,15 @@ extern void dm_host_shutdown(void);
 - (BOOL)application:(UIApplication *)app
         didFinishLaunchingWithOptions:(NSDictionary *)opts {
     (void)app; (void)opts;
-    /* 宿主装载放在这里，而不是 main() 里 UIApplicationMain 之前 ——
-       UIKit 起好之后线程与 runloop 才是「正常运行状态」，
-       而宿主会建线程、用 pthread 键、跑 TSD 校验，在 UIApplicationMain 之前做
-       容易撞上 UIKit 自己的初始化。（D2R 把一部分前置放在 main 开头、一部分放在这里，
-       我们简化为全放这里。） */
-    int rc = dm_ios_start();
-    if (rc != 0) {
-        /* 不要让界面起一个「什么都没有」的窗口 —— 直接给出可读的原因。
-           最常见：游戏文件的 18 个 .data 档案没拷进本 App 的文件夹。 */
-        UIAlertController *a =
-            [UIAlertController alertControllerWithTitle:@"还没准备好"
-                                                message:@"请把游戏 RomFS/data 里的 .data 档案拷进本 App 的文件夹，然后重新打开。"
-                                         preferredStyle:UIAlertControllerStyleAlert];
-        /* 此时窗口还没建，延到主队列里弹 */
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UIWindow *w = self.window ?: UIApplication.sharedApplication.windows.firstObject;
-            [w.rootViewController presentViewController:a animated:YES completion:nil];
-        });
-    }
+
+    /* ① 先把窗口立起来 —— 用户立刻能看到界面（含状态文字），而不是黑屏等着。
+     *    注意顺序：窗口先于装载。原版反过来了（先同步装载再指望 UI），
+     *    结果既黑屏又可能被看门狗杀掉。 */
+    self.window = dm_ios_make_window();
+
+    /* ② 装载放后台线程（不阻塞主线程与看门狗） */
+    dm_ios_boot_async();
+
     return YES;
 }
 
@@ -78,9 +81,9 @@ extern void dm_host_shutdown(void);
 
 int main(int argc, char *argv[]) {
     @autoreleasepool {
-        /* 注意：宿主装载**不在这里**做 —— 放在 application:didFinishLaunching 里。
-           原因：UIApplicationMain 之前 UIKit 还没起好，而宿主会建线程、用 pthread 键、
-           跑 TSD 校验，放在之前容易撞上 UIKit 自己的初始化。 */
+        /* 宿主装载**不在这里**做 —— 放在 application:didFinishLaunching 之后
+           的后台线程里（见上）。原因：UIApplicationMain 之前 UIKit 还没起好，
+           而宿主会建线程、用 pthread 键、跑 TSD 校验。 */
         return UIApplicationMain(argc, argv, nil, NSStringFromClass(DmAppDelegate.class));
     }
 }

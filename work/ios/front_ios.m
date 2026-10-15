@@ -18,6 +18,8 @@
 #import <Metal/Metal.h>
 /* 下面用了 snprintf —— 显式包含，不要指望 UIKit 间接带进来 */
 #include <stdio.h>
+#include <stdarg.h>     /* va_list —— status_set 用它（第 43 轮加状态文字时引入） */
+#include <string.h>
 
 #include "hle.h"
 #include "hle_nn.h"
@@ -57,19 +59,41 @@ extern void dm_nvn_QueuePresentTexture(void *q, void *win, int slot);
 static CAMetalLayer    *g_layer = nil;
 static id<MTLDevice>    g_device = nil;
 static CADisplayLink   *g_link = nil;
-static UIViewController *g_vc = nil;
 static int              g_running = 0;
+static uint64_t         g_frames = 0;      /* 帧计数（状态文字显示用，见 frame_tick） */
+
+/* ------------------------------------------------------------------ */
+/* 前置声明 —— 这两行**不能删**                                        */
+/* ------------------------------------------------------------------ */
+/* !! 第 44 轮补的一笔账 !!
+ *   clang 16 起（Xcode 16 自带的就是 16）「先调用、后声明」在 C99 及以后是
+ *   **硬错误**，不是警告：
+ *       error: call to undeclared function 'status_set';
+ *              ISO C99 and later do not support implicit function declarations
+ *   第 43 轮我给 frame_tick 加状态文字、给装载加后台线程时，把
+ *   status_set 的定义写在了 frame_tick **后面**、dm_ios_start 的定义写在了
+ *   调用点**后面** —— 这两处**在 Windows 上完全看不出来**（本机没有 ObjC 编译器，
+ *   也没有 clang），只会在朋友的 Mac 上炸掉一整个来回。
+ *   现在把它们提到最前面声明，并加了 work/porting/check_use_before_decl.py
+ *   做静态扫描（推给对方之前先跑一遍）。 */
+static void status_set(NSString *fmt, ...);
+int         dm_ios_start(void);
 
 /* ProMotion：iPhone 上 App 自己调 nextDrawable 时系统默认按 60 Hz 给画布。
    挂一个空回调的 CADisplayLink 来「申请」高刷（D2R 实测：还要在 Info.plist 里
-   加 CADisableMinimumFrameDurationOnPhone）。iPad 上同样适用。 */
+   加 CADisableMinimumFrameDurationOnPhone）。iPad 上同样适用。
+
+   !! 第 43 轮修正 !! 原来 CADisplayLink 的**目标**就是这个 DmRateHint，
+   而它的 tick: 是空实现 —— 于是真正的 frame_tick() 从来没被调用，宿主一帧都没跑。
+   高刷「申请」与「驱动帧循环」是两件事，不能共用一个空回调。
+   现在帧循环由 DmFrameTick 驱动（见下），本类只保留作说明；不再创建
+   （原版那条 g_rate_link 已删 —— 它是死代码，创建了却没人用它的回调）。 */
 @interface DmRateHint : NSObject
 - (void)tick:(CADisplayLink *)l;
 @end
 @implementation DmRateHint
 - (void)tick:(CADisplayLink *)l { (void)l; }   /* 只表态，不做事 */
 @end
-static CADisplayLink *g_rate_link = nil;
 
 /* ------------------------------------------------------------------ */
 /* 触摸 → 宿主输入                                                     */
@@ -128,16 +152,57 @@ static void touch_xy(UITouch *t, UIView *v, uint32_t *ox, uint32_t *oy) {
 /* 呈现循环                                                            */
 /* ------------------------------------------------------------------ */
 
-/* 一帧：先让宿主跑（它会调用 NVN，命令录进录音机），再提交。
-   真机上 dm_host_frame 内部应：
-     · 经 gate 分发跑客体的一帧
+/* 一帧：让宿主跑（它会调用 NVN，命令录进录音机；并且第一次会进客体）。
+   真机上 dm_host_frame 内部会：
+     · 第一次调用时 dm_host_enter_guest() → 起客体启动序列
+     · 之后经 gate 分发跑客体的一帧
      · 在 nvnQueueSubmitCommands 时把录音回放成 MTLCommandBuffer
      · 在 nvnQueuePresentTexture 时 presentDrawable */
 static void frame_tick(void) {
     if (!g_running) return;
     @autoreleasepool {
         dm_host_frame();
+        /* 帧计数：状态文字上能看出「帧循环有没有在跑」。
+         * 黑屏时这一条最关键 —— 数字不动 = 帧循环没起来；数字在动 = 起来了但画面是黑的。
+         * 只每 30 帧刷一次 UI（别每帧都改 UILabel，那会拖慢渲染）。 */
+        g_frames++;
+        if (g_frames % 30 == 1) status_set(@"帧循环运行中，第 %llu 帧", (unsigned long long)g_frames);
     }
+}
+
+/* !! 第 43 轮修正 !! 这里原来是 [DmRateHint new] 作为 CADisplayLink 的目标，
+ *   而 DmRateHint 的 tick: 是**空实现**（注释写「只表态，不做事」）——
+ *   于是 frame_tick() 从来没被调用，宿主一帧都没跑。
+ *   现在用一个**真正驱动帧循环**的目标。
+ *   （CADisplayLink 的 selector 不能带参数，所以只能这样包一层。） */
+@interface DmFrameTick : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+@implementation DmFrameTick
+- (void)tick:(CADisplayLink *)link { (void)link; frame_tick(); }
+@end
+static DmFrameTick *g_tick_target = nil;
+
+/* ------------------------------------------------------------------ */
+/* 状态文字（让「黑屏」变成「能看懂的提示」）                          */
+/* ------------------------------------------------------------------ */
+/* 为什么要它：这一版 Metal 层还没实现，画面本来就是黑的。
+ * 加一行状态字能把「黑屏」这个无信息现象变成可诊断的线索：
+ *   · 显示「正在装载…」→ 卡在装载
+ *   · 显示「装载失败 rc=-10」→ 明确是哪个模块
+ *   · 显示「已进客体，等待画面」→ 宿主起来了，问题在图形层
+ * 真机排障时这比看控制台方便（不用连电脑）。 */
+static UILabel *g_status = nil;
+
+static void status_set(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    /* 必须回主线程改 UI */
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_status) { g_status.text = s; }
+        NSLog(@"[dm] %@", s);
+    });
 }
 
 @interface DmVC : UIViewController
@@ -155,23 +220,26 @@ static void frame_tick(void) {
     g_layer.device = g_device;
     g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     g_layer.framebufferOnly = NO;      /* 允许从 drawable 读回（真机侧可能用于截图） */
+
+    /* 状态文字叠在 Metal 层上（左上角），黑屏时也能看到进度 */
+    g_status = [[UILabel alloc] initWithFrame:CGRectMake(16, 40, self.view.bounds.size.width - 32, 60)];
+    g_status.numberOfLines = 3;
+    g_status.textColor = [UIColor whiteColor];
+    g_status.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+    g_status.text = @"正在启动…";
+    g_status.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [self.view addSubview:g_status];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     if (g_link) return;
     g_running = 1;
-    /* 60 Hz 起步；真机侧若要 ProMotion，把 preferredFrameRateRange 调到 120 */
-    g_link = [CADisplayLink displayLinkWithTarget:[DmRateHint new]
+    if (!g_tick_target) g_tick_target = [DmFrameTick new];
+    /* 60 Hz 起步；本游戏引擎按横屏 60 fps 设计，高刷先不申请 */
+    g_link = [CADisplayLink displayLinkWithTarget:g_tick_target
                                          selector:@selector(tick:)];
-    if (@available(iOS 15.0, *)) {
-        g_link.preferredFrameRateRange = CAFrameRateRangeMake(30, 120, 60);
-    }
     [g_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
-    /* 另起一个稳定的 tick 驱动宿主帧（与刷新率解耦，便于限帧） */
-    g_rate_link = [CADisplayLink displayLinkWithTarget:[DmRateHint new]
-                                              selector:@selector(tick:)];
-    [g_rate_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 
 - (BOOL)prefersStatusBarHidden { return YES; }
@@ -184,6 +252,40 @@ static void frame_tick(void) {
 @end
 
 /* ------------------------------------------------------------------ */
+/* 供 main.m 调：建窗口 + 起 VC，并把装载放到后台线程                  */
+/* ------------------------------------------------------------------ */
+
+/* 在哪里装载、以及要不要起帧循环 —— 都由这里决定，main.m 不掺和 UI 细节。
+ *
+ * !! 第 43 轮修正 !!
+ *   原来 main.m 只是声明了 @property UIWindow *window 而**从来没建过窗口**，
+ *   于是 rootViewController 为 nil → DmVC 永不加载 → 黑屏。
+ *   同时 dm_ios_start() 是**同步**跑在 didFinishLaunching 里的 ——
+ *   装载 5 个模块（36 MB）+ 24,660 条重定位会拖住主线程，
+ *   iOS 的启动看门狗（约 20 秒）会杀进程。
+ *   现在：先让窗口可见（用户立刻看到状态文字），装载放后台线程。 */
+UIWindow *dm_ios_make_window(void) {
+    UIWindow *w = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    w.rootViewController = [[DmVC alloc] init];
+    w.backgroundColor = [UIColor blackColor];
+    [w makeKeyAndVisible];
+    return w;
+}
+
+void dm_ios_boot_async(void) {
+    status_set(@"正在装载游戏模块…");
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        /* 主线程已经起了，装载放这里跑 */
+        int rc = dm_ios_start();
+        if (rc != 0) {
+            status_set(@"装载失败 rc=%d\n（-10-i = 第 i 个模块）\n请看控制台或崩溃报告", rc);
+        } else {
+            status_set(@"已装载。等待启动序列…");
+        }
+    });
+}
+
+/* ------------------------------------------------------------------ */
 /* 生命周期与内存警告                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -192,14 +294,18 @@ static void frame_tick(void) {
 void dm_ios_enter_background(void) {
     g_running = 0;
     if (g_link) { [g_link invalidate]; g_link = nil; }
-    if (g_rate_link) { [g_rate_link invalidate]; g_rate_link = nil; }
 }
 
+/* 回到前台：重建帧循环。
+ * !! 第 43 轮修正 !! 原版这里也用了 [DmRateHint new]（空回调）——
+ *   而且 g_vc 从来没被赋值过，所以 if (!g_vc) return; 会让这个函数**永远直接返回**，
+ *   于是从后台回来后再也不会渲染。现在用真正的帧驱动目标。 */
 void dm_ios_enter_foreground(void) {
     if (g_running) return;
-    if (!g_vc) return;
+    if (g_link) return;
     g_running = 1;
-    g_link = [CADisplayLink displayLinkWithTarget:[DmRateHint new]
+    if (!g_tick_target) g_tick_target = [DmFrameTick new];
+    g_link = [CADisplayLink displayLinkWithTarget:g_tick_target
                                          selector:@selector(tick:)];
     [g_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
