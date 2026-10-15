@@ -354,8 +354,8 @@ int dm_boot_query_region(uint64_t addr, uint64_t *base, uint64_t *size,
     extern void dm_guest_stack_range(void **base, size_t *size);   /* hle_nvn_guest.c */
     for (unsigned i = 0; i < g_ctx.nmods; i++) {
         const dm_module *m = &g_ctx.mods[i];
-        if (addr >= m->base && addr < m->base + m->size) {
-            if (base) *base = m->base;
+        if (addr >= (uint64_t)m->base && addr < (uint64_t)m->base + m->size) {
+            if (base) *base = (uint64_t)m->base;
             if (size) *size = m->size;
             if (state) *state = 3;   /* Code */
             if (perm)  *perm  = 5;   /* R-X */
