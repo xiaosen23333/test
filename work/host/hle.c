@@ -200,10 +200,23 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                      失败给可重试的结果码：游戏启动按 2MB 递减重试（main+0x1b66184 同款）。 */
         uint64_t base = 0;
         int hrc = dm_plat_heap_set_size(r[DM_REG_X1], &base);
-        if (hrc == 0) { r[DM_REG_X0] = 0; r[DM_REG_X1] = base; }
-        else if (hrc == 1) { r[DM_REG_X0] = 0x10801ull; }   /* ResultLimitReached */
-        else { r[DM_REG_X0] = (uint64_t)-1; }
-        return 0; }
+        if (hrc == 0) {
+            /* 第 66 轮：把「请求的大小」和「回报的基址」都打出来 —— 上一轮只看到
+               x1=fffffffffe000000，分不清那是请求值还是基址，白猜一轮。 */
+            dm_diag_mark("[svc] 1 SetHeapSize 成功：请求 %#llx（%llu MB）→ 基址 %#llx",
+                         (unsigned long long)r[DM_REG_X1],
+                         (unsigned long long)(r[DM_REG_X1] >> 20),
+                         (unsigned long long)base);
+            r[DM_REG_X0] = 0; r[DM_REG_X1] = base; return 0;
+        }
+        /* 失败：x0 写真正的错误码并 return 3（分发器**不得**把它抹成成功）。
+           第 66 轮 .ips：之前抹成成功后，客体把入参 size 当成堆基址写 → 段错误。 */
+        dm_diag_mark("[svc] 1 SetHeapSize **失败** 请求 %#llx（%llu MB）→ %s",
+                     (unsigned long long)r[DM_REG_X1],
+                     (unsigned long long)(r[DM_REG_X1] >> 20),
+                     hrc == 1 ? "超出应用内存池 0x10801" : "分配失败 -1");
+        r[DM_REG_X0] = (hrc == 1) ? 0x10801ull : (uint64_t)-1;
+        return 3; }
     case 0x06: {  /* QueryMemory(MemoryInfo* x0, PageInfo* x1, addr x2) —— 第 57 轮加。
                      SDK 初始化主线程时拿当时的 sp 查询、把回报的整段当主线程栈；
                      宿主直接穿 x0 指针写 MemoryInfo（D2R hle_svc.c 0x06 同款）。
@@ -560,7 +573,17 @@ void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs) {
         int rc = -1;
         if (h->svc) rc = h->svc(regs, e->arg);
         if (rc != 0) rc = host_svc_impl(regs, e->arg);
-        if (rc == 0) {
+        if (rc == 3) {
+            /* !! 第 66 轮：host_svc_impl 已经在 x0 写了**真正的错误码**，别再抹成 0 !!
+             * 之前所有失败分支（SetHeapSize 超限等）都被下面那句
+             * `if (x0_is_result_code) x0 = 0` 抹掉 —— 于是客体看到「成功」，
+             * 而 x1 还是它自己传进来的入参（比如那个垃圾堆大小 0xfffffffffe000000），
+             * 客体拿它当堆基址一写就段错误（.ips DmGame-2026-10-16-002722 实证：
+             *   SetHeapSize 成功 x1=fffffffffe000000 → 故障地址 0xfffffffffe000010）。
+             * D2R 的语义正是「超限要报 0x10801，游戏按 2MB 递减重试」。 */
+            dm_diag_mark("[svc] %u (%s) **失败** x0=%#llx（保留错误码，不抹成成功）",
+                         e->arg, svc_name(e->arg), (unsigned long long)regs[DM_REG_X0]);
+        } else if (rc == 0) {
             /* 实现已写好内容。若该调用的 x0 是「结果码」，成功时置 0；
                若是「返回值」（如 GetSystemTick），保留实现写的数据。 */
             if (x0_is_result_code(e->arg)) regs[DM_REG_X0] = 0;
