@@ -119,6 +119,7 @@ static struct {
     int      shaders_loaded;
     int      vn_registered;
     int      fs_mounted;
+    int      prot_fail;      /* 页保护失败的段数（第 48 轮；>0 说明代码可能不可执行） */
 } g_boot_info;
 
 const void *dm_host_boot_info(void) { return &g_boot_info; }
@@ -190,6 +191,18 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
         tot.n_bad_sym += st.n_bad_sym;
     }
     g_boot_info.n_relocs = tot.n_relative + tot.n_abs + tot.n_jump + tot.n_tlsdesc;
+
+    /* !! 重定位做完之后、进客体之前：把各模块的**代码页设成可执行** !!
+     * 没有这一步，客体第一条指令就会炸（内核不执行不可执行的页），
+     * 而且症状是「宿主标记都正常、之后永远没下文」—— 第 48 轮才定位到。 */
+    {
+        int prot_fail = 0;
+        for (unsigned i = 0; i < g_ctx.nmods; i++)
+            prot_fail += dm_loader_finalize(&g_ctx.mods[i]);
+        dm_diag_mark("页保护已设好（代码 R+X / rodata R / data RW / 补丁区 R+X）；失败 %d 段",
+                     prot_fail);
+        g_boot_info.prot_fail = prot_fail;
+    }
     g_boot_info.n_tlsdesc = (unsigned)tot.n_tlsdesc;
     g_boot_info.nunres   = tot.n_unresolved;
 
@@ -268,11 +281,11 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
     g_boot_info.plan_found = g_plan.n_found;
 
     /* 装载完成 —— 这一行长期留在屏幕/日志上（真机排障的第一条线索） */
-    dm_diag_boot("模块 %u 重定位 %llu 门 %u 未解析 %u 计划 %d/5 着色器 %d NVN %d",
+    dm_diag_boot("模块 %u 重定位 %llu 门 %u 未解析 %u 计划 %d/5 着色器 %d NVN %d 页保护失败 %d",
                  g_boot_info.nmods, (unsigned long long)g_boot_info.n_relocs,
                  g_boot_info.ngates, g_boot_info.nunres,
                  g_boot_info.plan_found, g_boot_info.shaders_loaded,
-                 g_boot_info.vn_registered);
+                 g_boot_info.vn_registered, g_boot_info.prot_fail);
     dm_diag_mark("装载完成（客体入口 %s）", g_guest_entry ? "已解析" : "**没解析到**");
 
     g_booted = 1;

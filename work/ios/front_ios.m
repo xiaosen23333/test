@@ -32,6 +32,11 @@
 #include <string.h>
 #include <signal.h>     /* 崩溃捕获（第 46 轮） */
 #include <ucontext.h>   /* ucontext_t：从信号上下文里取 PC/LR/SP/寄存器 */
+#include <pthread.h>    /* pthread_mach_thread_np：看门狗要采主线程的 PC（第 48 轮） */
+#include <dlfcn.h>      /* dladdr：判断 PC 是不是落在宿主自己里，命中还能给出函数名 */
+#include <mach/mach.h>          /* thread_get_state —— 采卡住线程的寄存器 */
+#include <mach/thread_act.h>
+#include <mach/arm/thread_status.h>
 
 #include "hle.h"
 #include "hle_nn.h"
@@ -325,59 +330,96 @@ static void dm_crash_handler(int sig, siginfo_t *info, void *uctx) {
 static void dm_install_crash_handlers(void) {
     static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGSYS,
                                 SIGFPE, SIGABRT, SIGTRAP };
+    /* 备用信号栈：**栈溢出**（客体把栈用爆）时，正常栈已经不可用，
+       没有备用栈的话处理函数根本进不去 —— 那就一条线索也留不下。 */
+    static char altstack[SIGSTKSZ > 64 * 1024 ? SIGSTKSZ : 64 * 1024];
+    stack_t ss;
+    ss.ss_sp = altstack;
+    ss.ss_size = sizeof altstack;
+    ss.ss_flags = 0;
+    sigaltstack(&ss, NULL);
+
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = dm_crash_handler;
-    sa.sa_flags = SA_SIGINFO;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     for (unsigned i = 0; i < sizeof sigs / sizeof sigs[0]; i++)
         sigaction(sigs[i], &sa, NULL);
-    dm_diag_mark("崩溃捕获已装好（%u 个信号）", (unsigned)(sizeof sigs / sizeof sigs[0]));
+    dm_diag_mark("崩溃捕获已装好（%u 个信号 + 备用栈）", (unsigned)(sizeof sigs / sizeof sigs[0]));
 }
 
 /* ------------------------------------------------------------------ */
-/* 看门狗：区分「卡死」与「崩溃」                                      */
+/* 看门狗：区分「卡死」与「崩溃」，并**采样卡住线程的 PC**              */
 /* ------------------------------------------------------------------ */
-/* 为什么需要（第 47 轮加）：
- *   真机上出现的是**卡住**而不是崩溃时会很迷惑 —— 信号不会来，
- *   而主线程被客体占住，屏幕上的字也刷不动（所以屏幕上永远停在"进客体之前"那一帧）。
- *   看门狗跑在**自己的线程**上：发现帧循环心跳 N 秒没动，就往日志里写一行
- *   [看门狗]，带上「当前阶段」与「最近几次门调用」。
- *   下次启动时屏幕会显示日志尾部 —— 于是"卡住"也变成可读的线索。 */
+/* 为什么需要（第 47 轮加，第 48 轮加强）：
+ *   卡住时信号不会来，而主线程被客体占住 → 屏幕上的字也刷不动
+ *   （所以屏幕上永远停在「进客体之前」那一帧）。唯一能更新的只有日志。
+ *   第 48 轮起还会**采样主线程的 PC/LR**（thread_get_state）：
+ *     · PC 落在客体模块里 → 给出「sdk+0x…」这种偏移，直接反汇编就知道卡在哪条指令
+ *     · PC 落在宿主里     → dladdr 能给出宿主函数名（例如卡在某个 HLE 实现里）
+ *   并且会隔一段时间**再采一次**：PC 在变 = 在自旋；PC 不变且在一条系统调用指令上 = 在等。 */
+static volatile uint64_t g_heartbeat = 0;      /* frame_tick 每帧 +1（声明见上） */
 static int               g_watchdog_started = 0;
+static mach_port_t       g_main_port = MACH_PORT_NULL;   /* 主线程的 mach port */
+
+/* 采一次主线程的 PC/LR。0 = 没采到。 */
+static void dm_sample_stuck_thread(unsigned long long *pc, unsigned long long *lr) {
+    *pc = 0; *lr = 0;
+    if (g_main_port == MACH_PORT_NULL) return;
+#if defined(__aarch64__)
+    arm_thread_state64_t st;
+    mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(g_main_port, ARM_THREAD_STATE64,
+                         (thread_state_t)&st, &cnt) == KERN_SUCCESS) {
+        *pc = (unsigned long long)st.__pc;
+        *lr = (unsigned long long)st.__lr;
+    }
+#endif
+}
 
 static void dm_install_watchdog(void) {
     if (g_watchdog_started) return;
     g_watchdog_started = 1;
+    /* 在**主线程**上调一次，记下它的 mach port（后面靠它采样） */
+    g_main_port = pthread_mach_thread_np(pthread_self());
 
-    /* 3 秒后开始，每 2 秒看一次 */
+    /* 1 秒一跳：连读 3 次没动（≈3 秒）就报一次；之后每 5 秒再报一次，最多 4 次
+       —— 多报几次是为了看 PC 有没有在变（自旋 vs 等待） */
     dispatch_source_t t = dispatch_source_create(
         DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
         dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     dispatch_source_set_timer(t,
-                              dispatch_time(DISPATCH_TIME_NOW, 3ull * NSEC_PER_SEC),
-                              2ull * NSEC_PER_SEC,
-                              200ull * NSEC_PER_MSEC);
+                              dispatch_time(DISPATCH_TIME_NOW, 1ull * NSEC_PER_SEC),
+                              1ull * NSEC_PER_SEC,
+                              100ull * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(t, ^{
         static uint64_t last = 0;
-        static int      stall_ticks = 0;
-        static int      reported = 0;
+        static int      stall = 0, reports = 0;
         uint64_t now = g_heartbeat;
         if (now == last) {
-            stall_ticks++;
-            /* 连读 4 次没动 ≈ 8 秒 → 判定卡住，只报一次 */
-            if (stall_ticks >= 4 && !reported) {
-                reported = 1;
-                dm_diag_hang_line((unsigned long long)(stall_ticks * 2));
+            stall++;
+            if (stall >= 3 && (stall - 3) % 5 == 0 && reports < 4) {
+                reports++;
+                unsigned long long pc = 0, lr = 0;
+                dm_sample_stuck_thread(&pc, &lr);
+                const char *sym = NULL;
+                Dl_info info;
+                if (pc && dladdr((void *)(uintptr_t)pc, &info) && info.dli_sname) {
+                    sym = info.dli_sname;
+                    /* dladdr 在整个进程里都可能命中；只有落在宿主自己的可执行文件里
+                       才当成「卡在宿主里」—— 用符号名无法区分，这里只做到"能给出名字" */
+                }
+                dm_diag_hang_line((unsigned long long)(stall), pc, lr, sym);
             }
         } else {
-            stall_ticks = 0;
-            reported = 0;
+            stall = 0;
+            reports = 0;
         }
         last = now;
     });
     dispatch_resume(t);
-    dm_diag_mark("看门狗已启动（心跳不动 8 秒就写一行 [看门狗]）");
+    dm_diag_mark("看门狗已启动（心跳 3 秒不动就报一次，并采样主线程 PC）");
 }
 
 @interface DmVC : UIViewController

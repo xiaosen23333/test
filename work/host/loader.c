@@ -18,6 +18,7 @@
  */
 #include "hle.h"
 #include "loader.h"
+#include "hle_diag.h"    /* 页保护失败时记进诊断日志 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,13 +52,32 @@ uint64_t dm_tlsdesc_resolver(uint64_t *desc) {
       return p;
   }
   static void os_unmap(void *p, size_t n) { (void)n; VirtualFree(p, 0, MEM_RELEASE); }
+  static size_t os_page(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (size_t)si.dwPageSize; }
+  static int os_protect(void *p, size_t n, int prot) {
+      DWORD np = PAGE_READONLY;
+      int r = prot & DM_PROT_R, w = prot & DM_PROT_W, x = prot & DM_PROT_X;
+      if (x)      np = w ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+      else if (w) np = PAGE_READWRITE;
+      else if (r) np = PAGE_READONLY;
+      DWORD old;
+      return VirtualProtect(p, n, np, &old) ? 0 : -1;
+  }
 #else
   #include <sys/mman.h>
+  #include <unistd.h>
   static void *os_map(size_t n) {
       void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
       return (p == MAP_FAILED) ? NULL : p;
   }
   static void os_unmap(void *p, size_t n) { munmap(p, n); }
+  static size_t os_page(void) { return (size_t)getpagesize(); }
+  static int os_protect(void *p, size_t n, int prot) {
+      int np = 0;
+      if (prot & DM_PROT_R) np |= PROT_READ;
+      if (prot & DM_PROT_W) np |= PROT_WRITE;
+      if (prot & DM_PROT_X) np |= PROT_EXEC;
+      return mprotect(p, n, np);
+  }
 #endif
 
 static dm_load_ctx g_ctx;
@@ -208,6 +228,53 @@ int dm_loader_map(dm_module *m, const char *bin_path, const char *fixups_path,
  *   loader 是底层模块，不该依赖图形层。注册式让依赖方向保持单向。 */
 static void *(*g_fallback)(const char *name) = NULL;
 void dm_loader_set_fallback(void *(*fn)(const char *name)) { g_fallback = fn; }
+
+/* ---------------- 页保护（第 48 轮加 —— 真机「第一条客体指令就没了」的真因） --------
+ *
+ * dm_loader_map 给的是 **RW 匿名映射**（要能在上面写映像与重定位），
+ * 但 **内核不会执行不可执行的页**。所以映像写完、重定位做完之后，
+ * 必须把「代码」那几段改成 R+X，否则客体第一条指令就炸。
+ *
+ * 症状为什么难查（记下来别再踩）：
+ *   · 宿主侧的诊断标记全部正常（"调用 _init_libc1…" 都打出来了 —— 因为那是**宿主代码**在执行）
+ *   · 之后**永远没有下文**：既没有崩溃行，也没有看门狗行
+ *   · 把第一个调用从 _init 换成 _init_libc1，症状**一模一样**
+ *   ⇒ 因为出事的是**第一条客体指令**本身，跟调哪个函数无关。
+ */
+int dm_loader_finalize(dm_module *m) {
+    size_t ps = os_page();
+    uintptr_t base = (uintptr_t)m->base;
+    int fails = 0;
+
+#define DM_PROT_RANGE(off, end, prot)                                            \
+    do {                                                                         \
+        uintptr_t a = (base + (uintptr_t)(off)) & ~(uintptr_t)(ps - 1);           \
+        uintptr_t e = (base + (uintptr_t)(end) + ps - 1) & ~(uintptr_t)(ps - 1);  \
+        if (e > a && os_protect((void *)a, e - a, (prot)) != 0) {                 \
+            fails++;                                                             \
+            dm_diag_mark("页保护失败：%s [%#llx,%#llx) prot=%d", m->name,          \
+                         (unsigned long long)(off), (unsigned long long)(end),   \
+                         (prot));                                                \
+        }                                                                        \
+    } while (0)
+
+    DM_PROT_RANGE(0, m->L.ro_off, DM_PROT_R | DM_PROT_X);            /* 代码段 */
+    if (m->L.data_off > m->L.ro_off)
+        DM_PROT_RANGE(m->L.ro_off, m->L.data_off, DM_PROT_R);        /* rodata */
+    if (m->L.key_page_off > m->L.data_off)
+        DM_PROT_RANGE(m->L.data_off, m->L.key_page_off, DM_PROT_R | DM_PROT_W);
+    if (m->L.key_page_size)
+        DM_PROT_RANGE(m->L.key_page_off, m->L.key_page_off + m->L.key_page_size,
+                      DM_PROT_R | DM_PROT_W);                        /* 键页：读写 */
+    if (m->L.patch_len)
+        DM_PROT_RANGE(m->L.patch_off, m->L.patch_off + m->L.patch_len,
+                      DM_PROT_R | DM_PROT_X);                        /* 补丁区：可执行 */
+    if (m->size > m->L.patch_off + m->L.patch_len)
+        DM_PROT_RANGE(m->L.patch_off + m->L.patch_len, m->size, DM_PROT_R | DM_PROT_W);
+
+#undef DM_PROT_RANGE
+    return fails;
+}
 
 const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *name) {
     /* 与 loader.c 的 module_sym_linear 语义一致：首个「已定义且有名字」的同名符号 */

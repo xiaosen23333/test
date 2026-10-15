@@ -243,12 +243,26 @@ static void sb_gates(sb_t *b) {
     }
 }
 
-void dm_diag_hang_line(unsigned long long seconds) {
-    char buf[520];
+void dm_diag_hang_line(unsigned long long seconds, unsigned long long pc,
+                       unsigned long long lr, const char *host_sym) {
+    char buf[640];
     sb_t b = { buf, 0, (int)sizeof buf };
+    char nm[40];
     sb_s(&b, "\n[看门狗] 主线程 ");
     sb_dec(&b, seconds);
-    sb_s(&b, " 秒没有进展（帧循环不再前进）\n[看门狗] 当前阶段: ");
+    sb_s(&b, " 秒没有进展（帧循环不再前进）");
+    if (pc || lr) {
+        sb_s(&b, "\n[看门狗] 采样 PC ");
+        if (pc && dm_diag_addr(pc, nm, (int)sizeof nm)) { sb_s(&b, nm); }
+        else sb_hex(&b, pc);
+        sb_s(&b, "  LR ");
+        if (lr && dm_diag_addr(lr, nm, (int)sizeof nm)) { sb_s(&b, nm); }
+        else sb_hex(&b, lr);
+        if (host_sym && host_sym[0]) { sb_s(&b, "  （PC 在宿主里："); sb_s(&b, host_sym); sb_s(&b, "）"); }
+    } else {
+        sb_s(&b, "\n[看门狗] （没能采到 PC —— 线程可能已不存在）");
+    }
+    sb_s(&b, "\n[看门狗] 当前阶段: ");
     sb_s(&b, g_stage);
     sb_s(&b, "\n[看门狗] 最近门调用: ");
     sb_gates(&b);

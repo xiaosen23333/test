@@ -24,6 +24,9 @@ typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx;
                  uint64_t st_value, st_size; } dm_sym;
 typedef struct { uint64_t r_offset, r_info; int64_t r_addend; } dm_rela;
 
+/* 页保护位（os_protect 用；值与 POSIX 的 PROT_* 一致，Windows 侧在 loader.c 里映射） */
+enum { DM_PROT_R = 1, DM_PROT_W = 2, DM_PROT_X = 4 };
+
 /* 动态段 tag（实测确认；上一轮我把 0x17 记成 INIT_ARRAY 是错的） */
 enum {
     DM_DT_PLTRELSZ = 0x02, DM_DT_STRTAB = 0x05, DM_DT_SYMTAB = 0x06,
@@ -95,5 +98,23 @@ void dm_loader_unmap(dm_module *m);
  * （从解压模块反汇编确认过），所以这一格**不能是 0**，否则就是 `blr 0` 立刻崩。
  * 入参 = 描述符地址；返回 desc[1]（已填好的 TLS 偏移）。 */
 uint64_t dm_tlsdesc_resolver(uint64_t *desc);
+
+/* 给一个模块的映像设好页保护（第 48 轮加，**必须在跳进客体之前调**）。
+ *
+ * 为什么必须有它：
+ *   dm_loader_map 只给了「可读可写」的匿名映射（RW），而**内核不会执行不可执行的页**。
+ *   于是客体代码的第一条指令就会炸 —— 症状极具误导性：宿主侧的诊断标记
+ *   （"调用 _init…"）都正常打出来，之后**永远没有下文**，既没有崩溃行也没有看门狗行
+ *   （在 iOS 上执行不可执行页往往是直接被内核处理掉，用户看到的只是"没了"）。
+ *   本项目 loader.c 的文件头一直写着「用 mmap + mprotect」，但实现里从来没有
+ *   mprotect —— 这就是真机上「卡在启动序列第 1 步」的真因。
+ *
+ * 设的区域（用 fixups 里的段边界）：
+ *   代码 [0, RO_OFF)                  → R+X
+ *   rodata [RO_OFF, DATA_OFF)         → R
+ *   data/bss/键页                     → R+W
+ *   **改写器补丁区** [PATCH_OFF, +LEN) → R+X   ← 客体的改写代码全在这儿
+ * 返回 0 表示全部成功；>0 = 失败的区段数（失败原因由 loader.c 记进诊断日志）。 */
+int dm_loader_finalize(dm_module *m);
 
 #endif /* DM_LOADER_H */

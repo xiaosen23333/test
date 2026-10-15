@@ -91,8 +91,10 @@ void dm_diag_gate(unsigned long long ret);
  *   · 崩溃 → 信号处理写 [崩溃] 行（dm_diag_crash_line）
  *   · 卡住 → 主线程不再前进，信号不会来，屏幕也刷不动
  * 所以由 iOS 外壳起一个看门狗线程，发现「主线程 N 秒没有进展」时写一行
- * [看门狗]，把当前阶段与最近门调用一起记下来。
+ * [看门狗]，把当前阶段、最近门调用、以及**采样到的主线程 PC/LR** 一起记下来。
+ * pc/lr = 0 表示没采到；host_sym 非空表示 PC 落在宿主自己（dladdr 命中了符号名）。
  * 本函数在**普通线程**里被调（不是信号上下文），可以用 stdio。 */
-void dm_diag_hang_line(unsigned long long seconds);
+void dm_diag_hang_line(unsigned long long seconds, unsigned long long pc,
+                       unsigned long long lr, const char *host_sym);
 
 #endif /* DM_HLE_DIAG_H */
