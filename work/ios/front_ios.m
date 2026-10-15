@@ -19,6 +19,7 @@
 /* 下面用了 snprintf —— 显式包含，不要指望 UIKit 间接带进来 */
 #include <stdio.h>
 #include <stdarg.h>     /* va_list —— status_set 用它（第 43 轮加状态文字时引入） */
+#include <stdlib.h>     /* malloc / free —— log_tail 读日志尾部时用（第 45 轮） */
 #include <string.h>
 
 #include "hle.h"
@@ -28,6 +29,7 @@
 #include "hle_nvn_obj.h"
 #include "hle_nvn_cmd.h"
 #include "hle_nvn_metal.h"
+#include "hle_diag.h"     /* 诊断通道（hle_diag.c）：日志文件 + 一行总览 */
 
 /* 宿主侧入口（由 work/host/ 提供） */
 extern int   dm_host_boot(const char *romfs_dir, const char *save_dir);  /* 装载 + 初始化 */
@@ -78,6 +80,8 @@ static uint64_t         g_frames = 0;      /* 帧计数（状态文字显示用�
  *   做静态扫描（推给对方之前先跑一遍）。 */
 static void status_set(NSString *fmt, ...);
 int         dm_ios_start(void);
+const char *dm_ios_docs_dir(void);   /* 本文件下面实现；日志路径要用它 */
+static void refresh_status(NSString *head);
 
 /* ProMotion：iPhone 上 App 自己调 nextDrawable 时系统默认按 60 Hz 给画布。
    挂一个空回调的 CADisplayLink 来「申请」高刷（D2R 实测：还要在 Info.plist 里
@@ -164,9 +168,13 @@ static void frame_tick(void) {
         dm_host_frame();
         /* 帧计数：状态文字上能看出「帧循环有没有在跑」。
          * 黑屏时这一条最关键 —— 数字不动 = 帧循环没起来；数字在动 = 起来了但画面是黑的。
-         * 只每 30 帧刷一次 UI（别每帧都改 UILabel，那会拖慢渲染）。 */
+         * 只每 30 帧刷一次 UI（别每帧都改 UILabel，那会拖慢渲染）。
+         *
+         * !! 注意：如果客体（游戏）跑在主线程上不返回，**连这一句也刷不出来** ——
+         *   那时候唯一的线索是 <Documents>/dm-log.txt（下次启动会显示在屏幕上）。 */
         g_frames++;
-        if (g_frames % 30 == 1) status_set(@"帧循环运行中，第 %llu 帧", (unsigned long long)g_frames);
+        if (g_frames % 30 == 1)
+            status_set(@"帧循环运行中，第 %llu 帧", (unsigned long long)g_frames);
     }
 }
 
@@ -191,18 +199,78 @@ static DmFrameTick *g_tick_target = nil;
  *   · 显示「正在装载…」→ 卡在装载
  *   · 显示「装载失败 rc=-10」→ 明确是哪个模块
  *   · 显示「已进客体，等待画面」→ 宿主起来了，问题在图形层
- * 真机排障时这比看控制台方便（不用连电脑）。 */
+ * 真机排障时这比看控制台方便（不用连电脑）。
+ *
+ * !! 第 45 轮补的一个关键认识 !!
+ *   光有屏幕文字是**不够**的：客体（游戏）跑在**主线程**上
+ *   （CADisplayLink → frame_tick → dm_host_frame → dm_host_enter_guest → nnMain），
+ *   它一旦不返回，主线程就卡在里面 —— 屏幕上的字**再也不会更新**，
+ *   而我们最想知道的就是「它卡在哪一步」。崩溃时更是什么都看不到。
+ *   所以现在加了**日志文件**（<Documents>/dm-log.txt，每条都立刻落盘），
+ *   并且**每次启动会把上次运行日志的尾部直接显示在屏幕上** ——
+ *   装一次、跑一次、再打开就能看到上次崩在哪，不用连电脑、不用拷文件。 */
 static UILabel *g_status = nil;
+static NSString *g_status_head = nil;   /* 第一行的「人话状态」 */
+static NSString *g_prev_tail = nil;     /* 上次运行日志的尾部（启动时读一次） */
+
+static const char *dm_ios_log_path(void) {
+    static char buf[1300];
+    if (!buf[0]) snprintf(buf, sizeof buf, "%s/dm-log.txt", dm_ios_docs_dir());
+    return buf;
+}
+
+/* 读日志文件的尾部若干行。**必须在本次运行开始写日志之前调用**，
+   否则读到的就是本次已经写进去的内容。 */
+static NSString *log_tail(int want_lines) {
+    const char *path = dm_ios_log_path();
+    FILE *f = fopen(path, "rb");
+    if (!f) return @"（上次没有留下日志 —— 这是第一次运行）";
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz <= 0) { fclose(f); return @"（日志是空的）"; }
+    long take = (sz > 4096) ? 4096 : sz;
+    fseek(f, sz - take, SEEK_SET);
+    char *buf = (char *)malloc((size_t)take + 1);
+    if (!buf) { fclose(f); return @"（内存不足，读不了日志）"; }
+    size_t got = fread(buf, 1, (size_t)take, f);
+    fclose(f);
+    buf[got] = 0;
+
+    /* 从尾部往前数 want_lines 个换行 */
+    long start = (long)got;
+    int seen = 0;
+    for (long i = (long)got - 1; i >= 0; i--) {
+        if (buf[i] == '\n') { if (++seen > want_lines) break; start = i + 1; }
+    }
+    NSString *s = [NSString stringWithUTF8String:buf + start];
+    free(buf);
+    return s ?: @"（日志不是合法 UTF-8）";
+}
+
+/* 组装并刷新屏幕上那块文字。
+ * 三部分：人话状态（head）/ 一行总览（客体走到哪 + NVN 计数）/ 上次运行的日志尾部 */
+static void refresh_status(NSString *head) {
+    if (head) g_status_head = head;
+    char d[400];
+    dm_host_diag(d, (int)sizeof d);
+    NSString *diag = [NSString stringWithUTF8String:d];
+    if (!diag) diag = @"(诊断行组装失败)";
+
+    NSString *txt = [NSString stringWithFormat:@"%@\n%@\n—— 上次运行的最后几行 ——\n%@",
+                     g_status_head ?: @"", diag, g_prev_tail ?: @""];
+
+    /* 必须回主线程改 UI */
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_status) { g_status.text = txt; }
+        NSLog(@"[dm] %@", txt);
+    });
+}
 
 static void status_set(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
-    /* 必须回主线程改 UI */
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_status) { g_status.text = s; }
-        NSLog(@"[dm] %@", s);
-    });
+    refresh_status(s);
 }
 
 @interface DmVC : UIViewController
@@ -221,14 +289,20 @@ static void status_set(NSString *fmt, ...) {
     g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     g_layer.framebufferOnly = NO;      /* 允许从 drawable 读回（真机侧可能用于截图） */
 
-    /* 状态文字叠在 Metal 层上（左上角），黑屏时也能看到进度 */
-    g_status = [[UILabel alloc] initWithFrame:CGRectMake(16, 40, self.view.bounds.size.width - 32, 60)];
-    g_status.numberOfLines = 3;
+    /* 状态文字叠在 Metal 层上（左上角），黑屏时也能看到进度。
+     * 行数给足 8 行：本次状态 + 一行总览 + 「上次运行的最后几行」+ 日志尾部。
+     * 字体用等宽 —— 数字对齐，帧计数与 NVN 计数好读。 */
+    g_status = [[UILabel alloc] initWithFrame:CGRectMake(16, 30, self.view.bounds.size.width - 32, 200)];
+    g_status.numberOfLines = 8;
     g_status.textColor = [UIColor whiteColor];
-    g_status.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+    g_status.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
     g_status.text = @"正在启动…";
     g_status.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:g_status];
+
+    /* 读**上次运行**日志的尾部（必须在本次开始写日志之前读，否则读到的是本次的）。
+     * 这是崩溃后的主要线索来源：上次跑到哪一步、崩在哪 —— 开机就能看到。 */
+    g_prev_tail = log_tail(6);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -269,17 +343,25 @@ UIWindow *dm_ios_make_window(void) {
     w.rootViewController = [[DmVC alloc] init];
     w.backgroundColor = [UIColor blackColor];
     [w makeKeyAndVisible];
+    /* ↑ 这一句会触发 viewDidLoad，viewDidLoad 里读「上次运行日志的尾部」。
+       所以**日志要在这之后才打开**（先读旧的，再开始写新的）。 */
+    dm_diag_set_log(dm_ios_log_path());
+    dm_diag_mark("=== 本次启动（窗口已建）—— 日志 %s ===", dm_ios_log_path());
     return w;
 }
 
 void dm_ios_boot_async(void) {
     status_set(@"正在装载游戏模块…");
+    dm_diag_mark("开始后台装载（dm_host_boot）");
+
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         /* 主线程已经起了，装载放这里跑 */
         int rc = dm_ios_start();
         if (rc != 0) {
+            dm_diag_mark("装载**失败** rc=%d（-10-i = 第 i 个模块）", rc);
             status_set(@"装载失败 rc=%d\n（-10-i = 第 i 个模块）\n请看控制台或崩溃报告", rc);
         } else {
+            dm_diag_mark("装载成功：%s", dm_diag_boot_text());
             status_set(@"已装载。等待启动序列…");
         }
     });

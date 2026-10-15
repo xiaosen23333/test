@@ -77,6 +77,23 @@ jobs:
           done
           exit $fail
 
+      # 静态闸门：「先调用、后声明」在 clang 16 及以后是**硬错误**
+      #   error: call to undeclared function 'x';
+      #          ISO C99 and later do not support implicit function declarations
+      # 这类错误在 Windows 上完全看不出来（那边没有 ObjC 编译器），
+      # 第 43 轮就因此白跑一轮。这里先把行号打出来，方便一眼定位
+      # （真正让构建失败的是下面的 xcodebuild，所以这一步不阻断）。
+      - name: 静态闸门：先调用后声明（只为给出可读的行号提示）
+        continue-on-error: true
+        run: |
+          python3 ../porting/check_use_before_decl.py 2>&1 | tee -a build.log | tail -40
+          {
+            echo "### 静态闸门：先调用后声明"
+            echo '```'
+            python3 ../porting/check_use_before_decl.py 2>&1 | tail -6
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+
       - name: 编译（Release / 未签名）
         run: |
           set -o pipefail
@@ -91,7 +108,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
-            build 2>&1 | tee build.log
+            build 2>&1 | tee -a build.log
 
       # 专门对付「project.yml 清单漏了源文件」这类最难查的问题：
       # 逐个确认每个源文件真的被编译/汇编过，而不是被 Xcode 静默忽略。

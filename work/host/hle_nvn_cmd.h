@@ -33,4 +33,11 @@ void     dm_nvn_cmd_register_all(void);
 unsigned dm_nvn_cmd_registered(void);
 const void *dm_nvn_cmd_stats_ptr(void);
 
+/* 累计计数（诊断用；结构体本身是私有的，这几个是给 hle_diag.c 的窄接口）。
+ * 意义：n_recorded 在涨 = 客体真的在调 NVN 的绘制/状态类函数；
+ *       n_replayed 在涨 = 宿主真的在把它们翻成后端操作。 */
+uint64_t dm_nvn_stat_recorded(void);
+uint64_t dm_nvn_stat_replayed(void);
+uint64_t dm_nvn_stat_dropped(void);    /* 环形缓冲满而丢掉的条数（>0 说明录不过来） */
+
 #endif /* DM_HLE_NVN_CMD_H */

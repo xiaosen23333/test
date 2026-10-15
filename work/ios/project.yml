@@ -36,6 +36,9 @@ targets:
       - path: ../host/hle.c
       - path: ../host/loader.c
       - path: ../host/hle_host_dir.c
+      # 诊断通道（日志文件 + 一行总览）—— 第 45 轮加：
+      # 真机上「卡在哪一步」只能靠它，因为客体跑在主线程上，屏幕文字会停住
+      - path: ../host/hle_diag.c
       - path: ../host/hle_nn.c
       - path: ../host/hle_nn_fs.c
       - path: ../host/hle_nn_fs2.c

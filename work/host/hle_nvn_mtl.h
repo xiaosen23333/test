@@ -25,6 +25,16 @@ void dm_mtl_reset(void);
 /* 统计（画不出东西时靠它定位） */
 const void *dm_mtl_stats_ptr(void);
 
+/* 窄接口给 hle_diag.c（诊断行用）。这些是**本帧**的计数（每帧开始时清零）：
+ *   passes    本帧开了几个渲染通道
+ *   draws     本帧真正编进 Metal 的绘制调用数
+ *   presents  本帧提交了几次呈现
+ *   draws_no_target 想画但没有渲染目标 —— **黑屏最典型的原因**，所以单独列出来 */
+uint64_t dm_mtl_stat_passes(void);
+uint64_t dm_mtl_stat_draws(void);
+uint64_t dm_mtl_stat_presents(void);
+uint64_t dm_mtl_stat_draws_no_target(void);
+
 /* ---- 以下只有 Apple 上编译（hle_nvn_mtl_apply.m 提供） ---- */
 /* 真正调 Metal API 的入口。Windows 上不存在这些符号，调用方须自行按平台隔开。 */
 #if defined(__APPLE__)

@@ -50,6 +50,13 @@ static mtl_ctx g_m;
 
 const void *dm_mtl_stats_ptr(void) { return &g_m; }
 
+/* 窄接口给 hle_diag.c（诊断行用）—— 见 hle_nvn_mtl.h 的说明。
+   注意这些都是**本帧**的计数：dm_mtl_frame_begin / dm_mtl_reset 会清零。 */
+uint64_t dm_mtl_stat_passes(void)         { return g_m.n_passes; }
+uint64_t dm_mtl_stat_draws(void)          { return g_m.n_draws; }
+uint64_t dm_mtl_stat_presents(void)       { return g_m.n_presents; }
+uint64_t dm_mtl_stat_draws_no_target(void){ return g_m.n_draws_no_target; }
+
 void dm_mtl_reset(void) {
     memset(&g_m, 0, sizeof g_m);
     g_m.last_state_name = NULL;

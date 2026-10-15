@@ -26,6 +26,7 @@
 #include "hle.h"
 #include "loader.h"
 #include "hle_nn.h"
+#include "hle_diag.h"      /* 诊断通道：五步各打一个标记（真机上这是唯一能看到的东西） */
 /* 注意：没有 hle_nvn_boot.h —— 启动逻辑在 hle_nvn_boot.c 里，
    它的接口只有三个函数，直接在这里声明（我第一版 #include 了一个不存在的头，
    编译报 C1083）。理想做法是把它们提到一个头文件共用。 */
@@ -101,15 +102,50 @@ static void guest_main(void) {
      */
     typedef void (*fn0)(void);
 
+    /* !! 五步都打诊断标记（第 45 轮加）!!
+     * 为什么重要：客体**跑在主线程上**，它一旦不返回，屏幕上的字就再也不会更新
+     * （CADisplayLink 的回调卡在这里面）。所以这五条标记写的是**日志文件**，
+     * 而且每写一条就 fflush —— 真机上崩溃/卡死之后，日志里最后一条就是答案。
+     * 下一次启动时，iOS 外壳会把日志尾部直接显示在屏幕上。 */
     if (P->init_libc1) {
         /* 先跑 C++ 静态构造（__init_array），再初始化 libc 锁 ——
            这两个的先后在真机上可能要调（见上） */
-        if (P->init_array) ((fn0)P->init_array)();
+        if (P->init_array) {
+            dm_diag_stage(1, "调用 _init（C++ 静态构造）");
+            ((fn0)P->init_array)();
+            dm_diag_stage(1, "_init 已返回");
+        }
+        dm_diag_stage(1, "调用 _init_libc1（libc 锁初始化，略过会自锁死）");
         ((fn0)P->init_libc1)();
+        dm_diag_stage(1, "_init_libc1 已返回");
+    } else {
+        dm_diag_stage(1, "**没有 _init_libc1 符号**（计划里是空的）");
     }
-    if (P->os_initialize) ((fn0)P->os_initialize)();
-    if (P->init_startup)  ((fn0)P->init_startup)();
-    if (P->nn_main)       ((fn0)P->nn_main)();
+
+    if (P->os_initialize) {
+        dm_diag_stage(2, "调用 nnosInitialize（SDK 运行时）");
+        ((fn0)P->os_initialize)();
+        dm_diag_stage(2, "nnosInitialize 已返回");
+    } else {
+        dm_diag_stage(2, "**没有 nnosInitialize 符号**");
+    }
+
+    if (P->init_startup) {
+        dm_diag_stage(3, "调用 nninitStartup");
+        ((fn0)P->init_startup)();
+        dm_diag_stage(3, "nninitStartup 已返回");
+    } else {
+        dm_diag_stage(3, "**没有 nninitStartup 符号**");
+    }
+
+    if (P->nn_main) {
+        dm_diag_stage(4, "调用 nnMain（客体入口，之后游戏自己跑）");
+        ((fn0)P->nn_main)();
+        /* 能走到这一行说明 nnMain **返回**了 —— 对游戏来说这是异常情况 */
+        dm_diag_stage(5, "nnMain 已返回（游戏不该从 nnMain 返回）");
+    } else {
+        dm_diag_stage(4, "**没有 nnMain 符号**");
+    }
 
     /* 客体从 nnMain 返回 = 游戏退出。真机侧这里应当正常退出 App。 */
     fprintf(stderr, "[dm] nnMain 返回了（游戏应当是自己退出的）\n");
@@ -120,10 +156,12 @@ void dm_host_enter_guest(void) {
     static int entered = 0;
     if (entered) return;      /* 客体自己会一直跑，不该被重复进入 */
     entered = 1;
+    dm_diag_mark("dm_host_enter_guest：开始进客体");
 
     void *entry = dm_host_get_guest_entry();
     if (!entry) {
         fprintf(stderr, "[dm] 还没有客体入口点（nnMain 未解析）\n");
+        dm_diag_mark("**没有客体入口点** —— 回到宿主");
         return;
     }
 
@@ -131,7 +169,11 @@ void dm_host_enter_guest(void) {
        （AAPCS64 要求 SP 在函数入口 16 字节对齐） */
     void *stack_top = (void *)(g_guest_stack + DM_GUEST_STACK_SIZE);
 
+    dm_diag_mark("切栈进客体（栈 %u KB）", DM_GUEST_STACK_SIZE / 1024);
     dm_guest_enter((void *)guest_main, NULL, stack_top);
+
+    /* 能回到这里说明 dm_guest_enter 返回了（即客体那一路走完了） */
+    dm_diag_mark("客体那一路已返回宿主");
 }
 
 #else  /* 非 aarch64：本文件不产出任何代码 */

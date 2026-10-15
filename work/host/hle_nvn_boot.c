@@ -40,6 +40,7 @@
 #include "hle_nvn_metal.h"
 #include "hle_nvn_glslc.h"
 #include "hle_host_dir.h"      /* dm_host_res_dir()：资源目录（iOS 上必须是绝对路径） */
+#include "hle_diag.h"          /* 诊断通道：把「走到哪一步」写进日志/屏幕 */
 
 /* hle_nn_fs.c 提供（该文件没有配套头文件，故在此声明） */
 extern void dm_nn_fs_set_romfs_root(const char *dir);
@@ -133,6 +134,9 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
     if (g_booted) return 0;
     if (!romfs_dir) return -1;
 
+    dm_diag_mark("装载开始：romfs=%s", romfs_dir);
+    dm_diag_mark("存档目录=%s", (save_dir && save_dir[0]) ? save_dir : "(无)");
+
     snprintf(g_romfs, sizeof g_romfs, "%s", romfs_dir);
     if (save_dir) snprintf(g_save, sizeof g_save, "%s", save_dir);
 
@@ -163,8 +167,10 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
         int rc = dm_loader_map(m, bin, fix, g_ctx.key_values);
         if (rc) {
             fprintf(stderr, "[dm] 装载 %s 失败 rc=%d (%s)\n", g_mod_names[i], rc, dm_loader_err(rc));
+            dm_diag_mark("装载失败：第 %u 个模块 %s rc=%d", i, g_mod_names[i], rc);
             return -10 - (int)i;
         }
+        dm_diag_mark("已装载模块 %s", g_mod_names[i]);
         g_ctx.nmods++;
     }
     g_boot_info.nmods = g_ctx.nmods;
@@ -257,6 +263,14 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
     g_boot_info.guest_entry_found = g_plan.nn_main ? 1 : 0;
     g_boot_info.plan_found = g_plan.n_found;
 
+    /* 装载完成 —— 这一行长期留在屏幕/日志上（真机排障的第一条线索） */
+    dm_diag_boot("模块 %u 重定位 %llu 门 %u 未解析 %u 计划 %d/5 着色器 %d NVN %d",
+                 g_boot_info.nmods, (unsigned long long)g_boot_info.n_relocs,
+                 g_boot_info.ngates, g_boot_info.nunres,
+                 g_boot_info.plan_found, g_boot_info.shaders_loaded,
+                 g_boot_info.vn_registered);
+    dm_diag_mark("装载完成（客体入口 %s）", g_guest_entry ? "已解析" : "**没解析到**");
+
     g_booted = 1;
     return 0;
 }
@@ -280,9 +294,29 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
 
 void dm_host_frame(void) {
     if (!g_booted) return;
+
+    /* 只记第一次 —— 帧循环每帧都会调这里，不能每帧写日志 */
+    static int g_frame_seen = 0;
+    if (!g_frame_seen) { g_frame_seen = 1; dm_diag_mark("帧循环第一次调用 dm_host_frame"); }
+
 #if DM_CAN_ENTER_GUEST
-    if (g_guest_entry) { dm_host_enter_guest(); return; }
+    /* 注意：这两个标记都用**一次性的 static 闸门**。
+     * dm_host_frame 每帧都会被调（60 次/秒），不加闸门就会把日志刷爆
+     * —— 日志文件写满是小事，「把日志刷到看不见真正的那一行」才是大事。 */
+    static int g_logged_entry = 0, g_logged_noentry = 0;
+    if (g_guest_entry) {
+        if (!g_logged_entry) {
+            g_logged_entry = 1;
+            dm_diag_mark("dm_host_frame：进客体（入口 %p）", g_guest_entry);
+        }
+        dm_host_enter_guest();
+        return;
+    }
     /* 还没拿到入口点：说明 nn::ro::LoadModule 还没被调到 —— 真机侧应记录并等待 */
+    if (!g_logged_noentry) {
+        g_logged_noentry = 1;
+        dm_diag_mark("dm_host_frame：没有客体入口点，等待中");
+    }
 #else
     /* 非 aarch64：宿主把能做的都做完了（装载/重定位/门/NVN/着色器表就绪），
        但**无法执行客体代码**。这里不静默成功 —— 让自测能看出这件事。 */

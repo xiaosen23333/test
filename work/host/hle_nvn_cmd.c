@@ -249,6 +249,12 @@ void dm_nvn_cmd_enable(int on) { g_recording = on ? 1 : 0; }
 static unsigned g_cmd_registered = 0;
 unsigned dm_nvn_cmd_registered(void) { return g_cmd_registered; }
 
+/* 窄接口给 hle_diag.c（诊断行用）。放在这里而不是暴露结构体：
+   结构体加字段时不必去改别处。 */
+uint64_t dm_nvn_stat_recorded(void) { return g_cmd_stats.n_recorded; }
+uint64_t dm_nvn_stat_replayed(void) { return g_cmd_stats.n_replayed; }
+uint64_t dm_nvn_stat_dropped(void)  { return g_cmd_stats.n_dropped; }
+
 void dm_nvn_cmd_record(int idx, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     g_cmd_stats.n_recorded++;
     if (!g_recording) return;
