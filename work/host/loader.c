@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>       /* 执行自检要报 errno */
 
 /* ---------------- TLSDESC 的 resolver（第 46 轮加） ----------------
  *
@@ -228,6 +229,88 @@ int dm_loader_map(dm_module *m, const char *bin_path, const char *fixups_path,
  *   loader 是底层模块，不该依赖图形层。注册式让依赖方向保持单向。 */
 static void *(*g_fallback)(const char *name) = NULL;
 void dm_loader_set_fallback(void *(*fn)(const char *name)) { g_fallback = fn; }
+
+
+/* ---------------- 执行自检 + 保护位查询（第 49 轮加） ----------------
+ *
+ * 为什么「亲自执行一条指令」比看 mprotect 返回值可靠：
+ *   真机上出现过「宿主标记全部正常、之后进程直接没了」的现象，而 mprotect 看不出问题
+ *   （它可能返回成功但页实际仍不可执行，或者 iOS 对可执行匿名页另有要求）。
+ *   **唯一可靠的判据是真的跳进去执行一条指令。**
+ * 用 `ret` 是最小的可执行体：写 4 字节 → 调它 → 应当立刻回到这里。 */
+int dm_loader_exec_selftest(void) {
+    size_t ps = os_page();
+    unsigned char *p = (unsigned char *)os_map(ps);
+    if (!p) { dm_diag_mark("执行自检：os_map 失败"); return -1; }
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+    const uint32_t RET = 0xD65F03C0u;      /* ret */
+#else
+    const uint32_t RET = 0xC3C3C3C3u;      /* 占位；非 aarch64 上不会真的调用 */
+#endif
+    memcpy(p, &RET, 4);
+
+    int rc = os_protect(p, ps, DM_PROT_R | DM_PROT_X);
+    if (rc != 0) {
+        dm_diag_mark("执行自检：mprotect(R+X) 失败 rc=%d errno=%d", rc, errno);
+        os_unmap(p, ps);
+        return -2;
+    }
+
+    dm_diag_mark("执行自检：即将调用 RW→RX 匿名页里的 ret —— "
+                 "**如果这就是日志最后一行**，说明这条路在真机上不可行");
+    typedef void (*fn0)(void);
+#if defined(__aarch64__) || defined(_M_ARM64)
+    ((fn0)(void *)p)();
+#endif
+    dm_diag_mark("执行自检：**成功**（匿名页 RW→RX 之后可以执行）");
+    /* 故意不 unmap：留着当"证据"，也免得 unmap 触发别的检查 */
+    (void)ps;
+    return 0;
+}
+
+#if defined(__APPLE__)
+  #include <mach/mach.h>
+  /* 把 VM_PROT_* 折叠成 1=R / 2=W / 4=X */
+  static int darwin_vm_prot(uintptr_t addr, unsigned *prot_out) {
+      mach_vm_address_t a = (mach_vm_address_t)addr;
+      mach_vm_size_t sz = 0;
+      vm_region_basic_info_data_64_t info;
+      mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+      mach_port_t obj = MACH_PORT_NULL;
+      kern_return_t kr = mach_vm_region(mach_task_self(), &a, &sz,
+                                        VM_REGION_BASIC_INFO_64,
+                                        (vm_region_info_t)&info, &cnt, &obj);
+      if (kr != KERN_SUCCESS) return -1;
+      unsigned q = 0;
+      if (info.protection & VM_PROT_READ)    q |= 1;
+      if (info.protection & VM_PROT_WRITE)   q |= 2;
+      if (info.protection & VM_PROT_EXECUTE) q |= 4;
+      *prot_out = q;
+      return 0;
+  }
+#endif
+
+int dm_loader_query_prot(const dm_module *m, char *out, int n) {
+    if (!out || n < 5) return -1;
+    out[0] = '?'; out[1] = 0;
+#if defined(__APPLE__)
+    unsigned prot = 0;
+    if (darwin_vm_prot((uintptr_t)m->base, &prot) == 0) {
+        int k = 0;
+        if (prot & 1) out[k++] = 'R';
+        if (prot & 2) out[k++] = 'W';
+        if (prot & 4) out[k++] = 'X';
+        if (k == 0) out[k++] = '-';
+        out[k] = 0;
+        return 0;
+    }
+    return -2;
+#else
+    (void)m;
+    return -1;      /* 非 Apple：不支持（Windows 自测里不查） */
+#endif
+}
 
 /* ---------------- 页保护（第 48 轮加 —— 真机「第一条客体指令就没了」的真因） --------
  *

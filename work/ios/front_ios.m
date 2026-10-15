@@ -28,6 +28,11 @@
  * 两个宏一起定义才是「POSIX 接口 + Darwin 扩展」都能用。 */
 #define _DARWIN_C_SOURCE 1
 
+/* !! 构建标记 !! 屏幕第一行与日志里都会带上它。
+ * 加它的原因很实际：前一轮我没法确认用户装的是不是新版本，白白猜了一次。
+ * 用「轮次 + 编译时刻」——编译时刻由编译器给，不用手动维护。 */
+#define DM_BUILD_STAMP  "r49 " __DATE__ " " __TIME__
+
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
@@ -199,7 +204,8 @@ static void frame_tick(void) {
         g_frames++;
         g_heartbeat = g_frames;          /* 看门狗靠它判断主线程有没有在前进 */
         if (g_frames % 30 == 1)
-            status_set(@"帧循环运行中，第 %llu 帧", (unsigned long long)g_frames);
+            status_set(@"帧循环运行中，第 %llu 帧  [%s]",
+                       (unsigned long long)g_frames, DM_BUILD_STAMP);
     }
 }
 
@@ -403,11 +409,17 @@ static void dm_install_watchdog(void) {
                               100ull * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(t, ^{
         static uint64_t last = 0;
+        static unsigned long long lastt = 0;
         static int      stall = 0, reports = 0;
-        uint64_t now = g_heartbeat;
+        /* 同时看两个：帧心跳 + **日志活动**。
+           只看帧心跳会漏掉"还没进客体就卡住"的情况（那时帧循环可能没起来）。 */
+        uint64_t now = g_heartbeat + dm_diag_ticks();
+        unsigned long long tt = dm_diag_ticks();
+        if (tt != lastt) { stall = 0; reports = 0; lastt = tt; }
+        (void)now;
         if (now == last) {
             stall++;
-            if (stall >= 3 && (stall - 3) % 5 == 0 && reports < 4) {
+            if (stall >= 3 && (stall - 3) % 4 == 0 && reports < 5) {
                 reports++;
                 unsigned long long pc = 0, lr = 0;
                 dm_sample_stuck_thread(&pc, &lr);
@@ -449,7 +461,7 @@ static void dm_install_watchdog(void) {
      * 行数给足 8 行：本次状态 + 一行总览 + 「上次运行的最后几行」+ 日志尾部。
      * 字体用等宽 —— 数字对齐，帧计数与 NVN 计数好读。 */
     g_status = [[UILabel alloc] initWithFrame:CGRectMake(16, 30, self.view.bounds.size.width - 32, 200)];
-    g_status.numberOfLines = 12;   /* 状态 + 总览 + 「上次运行」+ 最多 8 行日志尾部 */
+    g_status.numberOfLines = 16;   /* 状态 + 总览 + 「上次运行」+ 最多 12 行日志尾部 */
     g_status.textColor = [UIColor whiteColor];
     g_status.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
     g_status.text = @"正在启动…";
@@ -458,7 +470,7 @@ static void dm_install_watchdog(void) {
 
     /* 读**上次运行**日志的尾部（必须在本次开始写日志之前读，否则读到的是本次的）。
      * 这是崩溃后的主要线索来源：上次跑到哪一步、崩在哪 —— 开机就能看到。 */
-    g_prev_tail = log_tail(8);   /* 崩溃那块一次写 4~5 行，给足 8 行才不会截掉 */
+    g_prev_tail = log_tail(12);  /* 关键标记都在尾部：页保护/执行自检/看门狗都要看得到 */
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -502,7 +514,8 @@ UIWindow *dm_ios_make_window(void) {
     /* ↑ 这一句会触发 viewDidLoad，viewDidLoad 里读「上次运行日志的尾部」。
        所以**日志要在这之后才打开**（先读旧的，再开始写新的）。 */
     dm_diag_set_log(dm_ios_log_path());
-    dm_diag_mark("=== 本次启动（窗口已建）—— 日志 %s ===", dm_ios_log_path());
+    dm_diag_set_build(DM_BUILD_STAMP);
+    dm_diag_mark("=== 本次启动 [%s] —— 日志 %s ===", DM_BUILD_STAMP, dm_ios_log_path());
     /* 崩溃捕获要在装载之前装好 —— 装载与进客体都可能崩 */
     dm_install_crash_handlers();
     /* 看门狗也一起起：区分「卡死」与「崩溃」（客体占住主线程时屏幕刷不动） */

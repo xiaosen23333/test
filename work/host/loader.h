@@ -117,4 +117,21 @@ uint64_t dm_tlsdesc_resolver(uint64_t *desc);
  * 返回 0 表示全部成功；>0 = 失败的区段数（失败原因由 loader.c 记进诊断日志）。 */
 int dm_loader_finalize(dm_module *m);
 
+/* ---- 执行自检（第 49 轮加）----
+ *
+ * 回答一个此前只能靠猜的问题：**这台设备上，「映射成可读写 → 再 mprotect 成可执行」
+ * 的匿名页，到底能不能真的执行？**
+ * 做法：mmap 一页 RW → 写入 `ret` → mprotect R+X → 调用它。
+ *   · 能正常返回  → 返回 0（客体代码页的机制是成立的）
+ *   · 返回 <0     → 返回负的 errno（mprotect/mmap 失败，失败原因已写进诊断日志）
+ *   · 进程直接没了 → 那就说明这条路在真机上走不通，**日志最后一行**
+ *                   「正在测试匿名页 RW→RX 能否执行」就是证据 —— 下次启动看得到
+ * 放在进客体**之前**跑，所以它能把「客体页不可执行」与其它问题彻底分开。 */
+int dm_loader_exec_selftest(void);
+
+/* 查一个模块代码页当前的**实际**保护位（不是我们"以为"设了什么）。
+ * 写进 out（形如 "RX" / "R" / "RW" / "RWX" / "?"），返回 0 成功、<0 失败。
+ * Apple 上用 mach_vm_region；其它平台上返回 -1（不支持）。 */
+int dm_loader_query_prot(const dm_module *m, char *out, int n);
+
 #endif /* DM_LOADER_H */

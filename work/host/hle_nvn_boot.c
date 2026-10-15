@@ -203,6 +203,25 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
                      prot_fail);
         g_boot_info.prot_fail = prot_fail;
     }
+
+    /* !! 执行自检：这台设备到底能不能执行「RW 映射 → mprotect 成 RX」的页 !!
+     * 为什么必须亲自执行一条指令：上一次真机日志停在「调用 _init_libc1」之后再无下文，
+     * 既没有崩溃行也没有看门狗行 —— 而 mprotect 的返回值看不出问题。
+     * 现在改成**真的写入一条 ret 并调用它**：
+     *   · 能返回 → 日志会写「执行自检：成功」
+     *   · 进程直接没了 → 日志最后一行就是「即将调用 RW→RX 匿名页里的 ret」
+     * 两种结果都会留在日志里，下次启动屏幕上就能看到。 */
+    dm_diag_mark("即将做执行自检（匿名页 RW→RX 后执行一条 ret）");
+    dm_diag_mark("执行自检结果 rc=%d（0=成功；-2= mprotect 失败）",
+                 dm_loader_exec_selftest());
+
+    /* 顺便问内核：各模块代码页**实际**的保护位（不是我们以为设了什么） */
+    for (unsigned i = 0; i < g_ctx.nmods; i++) {
+        char pr[8];
+        int qrc = dm_loader_query_prot(&g_ctx.mods[i], pr, (int)sizeof pr);
+        dm_diag_mark("代码页实际保护 %s = %s（查询 rc=%d）",
+                     g_ctx.mods[i].name, (qrc == 0) ? pr : "?", qrc);
+    }
     g_boot_info.n_tlsdesc = (unsigned)tot.n_tlsdesc;
     g_boot_info.nunres   = tot.n_unresolved;
 

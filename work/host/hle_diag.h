@@ -54,6 +54,14 @@ const char *dm_diag_stage_text(void);   /* 形如 "3/5 调用 nninitStartup" */
 const char *dm_diag_boot_text(void);
 const char *dm_diag_last_event(void);
 
+/* 构建标记（第 49 轮加）：屏幕上/日志里带上「这是哪一版」——
+ * 我此前靠猜用户装的是不是新版本，浪费了一轮。现在第一行就写着它。 */
+void dm_diag_set_build(const char *stamp);
+
+/* 日志活动计数：任何一次写日志都会 +1。
+ * 看门狗看它（而不只是看帧心跳）—— 这样**装载阶段**卡住也能被发现。 */
+unsigned long long dm_diag_ticks(void);
+
 /* 一行总览：客体走到哪 + 命令录音/回放 + 本帧 pass/draw/present。
  * 写进 buf（不超过 n，含结尾 0），返回写入的字符数。
  * 这几个数字正好回答「帧循环有没有跑」「客体有没有到渲染」「画面为什么是黑的」。*/

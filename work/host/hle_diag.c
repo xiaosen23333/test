@@ -32,6 +32,8 @@ static int   g_logfd = -1;      /* 与 g_log 同一个文件；崩溃时用它�
 /* 三段长期保存的文字 */
 static char g_boot[192]  = "（还没装载）";
 static char g_stage[160] = "还没进客体";
+static char g_build[64]  = "(未标记)";
+static volatile unsigned long long g_ticks = 0;
 static char g_event[160] = "（无事件）";
 static int  g_stage_no   = 0;
 
@@ -82,7 +84,14 @@ void dm_diag_set_log(const char *path) {
 
 int dm_diag_log_fd(void) { return g_logfd; }
 
+void dm_diag_set_build(const char *stamp) {
+    if (!stamp) return;
+    snprintf(g_build, sizeof g_build, "%s", stamp);
+}
+unsigned long long dm_diag_ticks(void) { return g_ticks; }
+
 static void emit(const char *line) {
+    g_ticks++;
     if (!g_log) return;
     fputs(line, g_log);
     fputc('\n', g_log);
@@ -143,8 +152,8 @@ const char *dm_diag_last_event(void) { return g_event; }
 int dm_host_diag(char *buf, int n) {
     if (!buf || n <= 0) return 0;
     return snprintf(buf, (size_t)n,
-                    "客体 %s | 录 %llu 放 %llu 丢 %llu | 本帧 pass %llu draw %llu present %llu",
-                    g_stage,
+                    "[%s] 客体 %s | 录 %llu 放 %llu 丢 %llu | 本帧 pass %llu draw %llu present %llu",
+                    g_build, g_stage,
                     (unsigned long long)dm_nvn_stat_recorded(),
                     (unsigned long long)dm_nvn_stat_replayed(),
                     (unsigned long long)dm_nvn_stat_dropped(),
