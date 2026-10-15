@@ -318,26 +318,37 @@ static uint8_t *g_heap;
 static uint64_t g_heap_cap;
 static uint64_t g_heap_cur;               /* SetHeapSize 记账的大小（GetInfo 用） */
 
-int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
-    if (!g_heap) {
-        vm_address_t addr = 0;
-        kern_return_t kr = vm_allocate(mach_task_self(), &addr, DM_APP_POOL, VM_FLAGS_ANYWHERE);
-        if (kr != KERN_SUCCESS) {
-            dm_diag_mark("SetHeapSize：预留 %llu MB 失败 kr=%d", DM_APP_POOL >> 20, kr);
-            return -1;
-        }
-        g_heap = (uint8_t *)addr;
-        g_heap_cap = DM_APP_POOL;
-        dm_diag_mark("客体堆：预留 %llu MB @ %p", DM_APP_POOL >> 20, g_heap);
+/* 预留客体堆池（只占地址空间，不提交内存）。成功 0 / 失败 -1。 */
+static int heap_reserve(void) {
+    if (g_heap) return 0;
+    vm_address_t addr = 0;
+    kern_return_t kr = vm_allocate(mach_task_self(), &addr, DM_APP_POOL, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        dm_diag_mark("SetHeapSize：预留 %llu MB 失败 kr=%d", DM_APP_POOL >> 20, kr);
+        return -1;
     }
+    g_heap = (uint8_t *)addr;
+    g_heap_cap = DM_APP_POOL;
+    dm_diag_mark("客体堆：预留 %llu MB @ %p", DM_APP_POOL >> 20, g_heap);
+    return 0;
+}
+
+int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
+    if (heap_reserve()) return -1;
     if (size > g_heap_cap) return 1;      /* ResultLimitReached —— 游戏会按 2MB 递减重试 */
     g_heap_cur = size;
     if (base_out) *base_out = (uint64_t)g_heap;
     return 0;
 }
 
-/* GetInfo 用（第 58 轮）：堆基址 / 池上限 / 已记账大小 */
+/* GetInfo 用（第 58 轮）：堆基址 / 池上限 / 已记账大小。
+ * !! 第 66 轮：这里**必须先确保池已预留** !!
+ * D2R 是开局 mem_init() 就把堆/alias/stack 全预留好，所以 GetInfo(6 总内存 /
+ * 21 非系统内存) 一开始就是池的真实大小。我们原来是懒加载 —— 首次 SetHeapSize
+ * 之前这几个量全是 0，客体拿 0 去算堆大小就算出负数
+ * （实证：请求 0xfffffffffe000000 = 0 − 0x2000000）。 */
 void dm_plat_heap_peek(uint64_t *base, uint64_t *cap, uint64_t *cur) {
+    heap_reserve();
     if (base) *base = g_heap ? (uint64_t)g_heap : 0;
     if (cap)  *cap  = g_heap ? g_heap_cap : 0;
     if (cur)  *cur  = g_heap_cur;

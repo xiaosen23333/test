@@ -187,6 +187,40 @@ void dm_guest_alias_range(void **base, size_t *size) {
     if (size) *size = g_alias_cap;
 }
 
+/* ---------------- ASLR 区（GetInfo 12/13；照 D2R hle_svc.c 的 RESERVE）----------------
+ * 为什么必须有：第 66 轮真机日志实证 —— 客体请求堆大小
+ * `0xfffffffffe000000`（17592186044384 MB），正好等于 **0 − 0x2000000**，
+ * 而 0x2000000 就是我们 GetInfo(16) SystemResource 总量。也就是说客体算堆大小时
+ * 用到了一项我们回报 0、而 D2R 回报真值的量 —— 就是 ASLR 区大小（id 13）。
+ * 报 0 让公式出负数 → 客体拿这个负数当堆大小 → 我们拒了它又不会算 → 走不通。
+ * 照 D2R：预留一大块只占地址空间的 PROT_NONE 区，把基址和长度报出去。
+ * 预留失败就逐级退让（5G → 2G → 1G），总比报 0 强。 */
+#define DM_ASLR_WANT  (5ull << 30)
+static uint8_t *g_as;
+static size_t   g_as_cap;
+
+static void dm_aslr_ensure(void) {
+    if (g_as) return;
+    static const size_t tries[] = { (size_t)DM_ASLR_WANT, 2u << 30, 1u << 30 };
+    for (unsigned i = 0; i < sizeof tries / sizeof tries[0] && !g_as; i++) {
+#if defined(_WIN32)
+        void *p = VirtualAlloc(NULL, tries[i], MEM_RESERVE, PAGE_NOACCESS);
+#else
+        void *p = mmap(NULL, tries[i], PROT_NONE,
+                       MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+        if (p == MAP_FAILED) p = NULL;
+#endif
+        if (p) { g_as = (uint8_t *)p; g_as_cap = tries[i]; }
+    }
+    dm_diag_mark("ASLR 区 %p +%#zx（GetInfo 12/13）", (void *)g_as, g_as_cap);
+}
+
+void dm_guest_aslr_range(void **base, size_t *size) {
+    dm_aslr_ensure();
+    if (base) *base = g_as;
+    if (size) *size = g_as_cap;
+}
+
 static int host_svc_impl(uint64_t *r, uint32_t n) {
     switch (n) {
     case 0x1e:  /* GetSystemTick —— x0 就是 tick 值 */
@@ -465,6 +499,10 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         void *sb = NULL; size_t ssz = 0;
         dm_guest_stack_range(&sb, &ssz);
         switch (id) {
+        /* 第 66 轮：这两项 D2R 报真值、我们原来走 default 报 0 —— 客体拿它算堆大小，
+           报 0 就算出负数（实证：请求 0xfffffffffe000000 = 0 − 0x2000000）。 */
+        case 0:  v = 7; break;                                      /* CoreMask（D2R 同款） */
+        case 1:  v = 0; break;                                      /* PriorityMask */
         /* 第 64 轮：别名区**必须**是独立的一段，不能拿堆池顶替 —— SDK 的 VammManager
            拿它挑地址后再用 svc 0x2C 打开那页；报成堆池会让 0x2C 的越界检查全落空，
            页没打开就回去写 → SIGSEGV（.ips 实证）。 */
@@ -476,6 +514,8 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         case 7:  v = hcur; break;                        /* UsedMemorySize */
         case 8:  v = 0; break;                           /* DebuggerAttached */
         case 11: v = dm_host_ticks(); break;             /* RandomEntropy */
+        case 12: dm_aslr_ensure(); v = (uint64_t)g_as; break;   /* AslrRegionAddress */
+        case 13: dm_aslr_ensure(); v = g_as_cap;   break;       /* AslrRegionSize */
         case 14: v = (uint64_t)sb; break;                /* StackRegionAddress */
         case 15: v = ssz; break;                         /* StackRegionSize */
         case 16: v = 0x2000000ull; break;                /* SystemResource 总量（D2R） */
