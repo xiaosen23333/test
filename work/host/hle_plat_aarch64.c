@@ -131,6 +131,52 @@ static void install_current_thread(void *tlr_tp) {
     if (tlr_tp) *(void **)((char *)tlr_tp + 0x1F8) = g_current_thread_type;
 }
 
+/* 裸读 tpidrro_el0（与改写后的客体同一条路：它不经过 pthread_getspecific） */
+static inline unsigned long long rd_tpidrro_raw(void) {
+    unsigned long long v;
+    __asm__ __volatile__("mrs %0, tpidrro_el0" : "=r"(v));
+    return v;
+}
+
+/* 装槽时的 4 个「应填值」与键号（崩溃倾倒 / 读回核对用） */
+static unsigned long long g_key_nums[DM_KEY_COUNT];
+static unsigned long long g_want_vals[DM_KEY_COUNT];
+
+/* 崩溃 handler 里调（第 55 轮）：把 4 个线程槽的「应填值 vs 裸读实值」写进日志。
+ * 只做读 + 手写格式化 + write —— 信号处理里唯一安全的做法（与 hle_diag.c 同规）。
+ * 起因：PrepareAbort 崩溃时 KTLR 槽里是野指针 0x14f014200，无法分辨
+ * 「槽被改写」还是「Darwin 直通槽假设失效」，下次崩溃这行日志直接给出答案。 */
+static void put_hex(char *buf, int *n, int cap, unsigned long long v) {
+    char t[17]; int m = 0;
+    if (!v) t[m++] = '0';
+    while (v) { unsigned d = (unsigned)(v & 0xF); t[m++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); v >>= 4; }
+    if (*n < cap - 1) buf[(*n)++] = '0';
+    if (*n < cap - 1) buf[(*n)++] = 'x';
+    while (m && *n < cap - 1) buf[(*n)++] = t[--m];
+}
+
+void dm_plat_dump_slots_crash(void) {
+    char buf[512];
+    int n = 0, cap = (int)sizeof buf;
+    unsigned long long tp = rd_tpidrro_raw();
+    const char *head = "\n[崩溃] 线程槽 tpidrro=";
+    for (const char *p = head; *p && n < cap - 1; p++) buf[n++] = *p;
+    put_hex(buf, &n, cap, tp);
+    const char *names[DM_KEY_COUNT] = { " K18=", " KTLS=", " KTLR=", " KGATE=" };
+    for (int i = 0; i < DM_KEY_COUNT; i++) {
+        for (const char *p = names[i]; *p && n < cap - 1; p++) buf[n++] = *p;
+        put_hex(buf, &n, cap, *(unsigned long long *)(tp + g_key_nums[i]));
+        if (g_want_vals[i] != *(unsigned long long *)(tp + g_key_nums[i])) {
+            const char *mm = "(≠应填";
+            for (const char *p = mm; *p && n < cap - 1; p++) buf[n++] = *p;
+            put_hex(buf, &n, cap, g_want_vals[i]);
+            if (n < cap - 1) buf[n++] = ')';
+        }
+    }
+    if (n < cap - 1) buf[n++] = '\n';
+    dm_diag_append_crash_text(buf, n);
+}
+
 /* 给**当前线程**装好 4 个槽。幂等。必须在客体代码用到它们之前调用 ——
    也就是在 dm_guest_enter 之前（见 hle_nvn_guest.c）。
    宿主自己再建客体线程时（nn::os::CreateThread）也要在该线程里调一次。 */
@@ -147,11 +193,46 @@ void dm_plat_tls_install(void) {
     /* SDK 从这里找「当前线程」（见上面的说明）—— 必须在客体跑起来之前写好 */
     install_current_thread(tp_tlr);
 
+    /* TLR+0x1F0 = 「当前 TP」的 SDK 记账位（第 55 轮，从原 sdk 反汇编实测）：
+     *   sdk+0x147fec（ThreadManagerImplByHorizon 构造）:
+     *       mrs x8, tpidrro ; ldr x8, [x8, #0x1F0] ; msr tpidr_el0, x8
+     *   sdk+0x99b4c（nn::os 内部）: str x22, [x8, #0x1F0] ; msr tpidr_el0, x22
+     * 即：SDK 切/还原线程指针都经 TLR+0x1F0。不预填的话第一次切换后 TP=0，
+     * main 里 1259 处 mrs tpidr_el0 全部读到空指针。 */
+    *(void **)((char *)tp_tlr + 0x1F0) = tp_tls;
+
     pthread_setspecific((pthread_key_t)k18,   tp_tls);
     pthread_setspecific((pthread_key_t)ktls,  tp_tls);
     pthread_setspecific((pthread_key_t)ktlr,  tp_tlr);
     pthread_setspecific((pthread_key_t)kgate, (void *)dm_gate);
     g_tls_installs++;
+
+    /* 记下键号与应填值（崩溃倾倒 dm_plat_dump_slots_crash 用） */
+    g_key_nums[DM_KEY_K18]   = (unsigned long long)k18   * 8;
+    g_key_nums[DM_KEY_KTLS]  = (unsigned long long)ktls  * 8;
+    g_key_nums[DM_KEY_KTLR]  = (unsigned long long)ktlr  * 8;
+    g_key_nums[DM_KEY_KGATE] = (unsigned long long)kgate * 8;
+    g_want_vals[DM_KEY_K18]  = (unsigned long long)tp_tls;
+    g_want_vals[DM_KEY_KTLS] = (unsigned long long)tp_tls;
+    g_want_vals[DM_KEY_KTLR] = (unsigned long long)tp_tlr;
+    g_want_vals[DM_KEY_KGATE]= (unsigned long long)dm_gate;
+
+    /* 直通槽读回核对（第 55 轮诊断）：改写后的客体按「tpidrro_el0 + 8×键号」裸读，
+     * 不经过 pthread_getspecific。这里用同一条路读回 —— 若不一致，说明 Darwin 的
+     * 直通槽假设在这个键号上不成立，必须在进客体前发现（第 55 轮 .ips：
+     * 崩在 PrepareAbort 时 KTLR 槽已是野指针 0x14f014200，事后无法分辨是哪一类）。 */
+    {
+        unsigned long long tp = rd_tpidrro_raw();
+        unsigned long long got[DM_KEY_COUNT];
+        int bad = 0;
+        for (int i = 0; i < DM_KEY_COUNT; i++) {
+            got[i] = *(unsigned long long *)(tp + g_key_nums[i]);
+            if (got[i] != g_want_vals[i]) bad = 1;
+        }
+        dm_diag_mark("槽读回核对：%s（tpidrro=%llx K18=%llx KTLS=%llx KTLR=%llx KGATE=%llx）",
+                     bad ? "**不一致 —— 直通槽假设失效！**" : "一致",
+                     tp, got[0], got[1], got[2], got[3]);
+    }
 
     if (!b->installed) {
         b->installed = 1;

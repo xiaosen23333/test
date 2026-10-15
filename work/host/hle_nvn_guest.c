@@ -59,7 +59,7 @@ static unsigned char g_guest_stack[DM_GUEST_STACK_SIZE] __attribute__((aligned(1
    理想做法是提到头文件共用（我在第 29 轮的错里记过这条）。 */
 typedef struct {
     void *init_libc0;      /* sdk::_init_libc0 */
-    void *os_initialize;   /* nnosInitialize（x0 = 主线程 ThreadType*，x1 = 0） */
+    void *os_initialize;   /* nnosInitialize（x0 = 主线程句柄，x1 = 0） */
     void *init_libc1;      /* sdk::_init_libc1 */
     void *sdk_module;      /* nninitInitializeSdkModule */
     void *init_startup;    /* nninitStartup */
@@ -71,11 +71,18 @@ typedef struct {
 /* !! 上面这 9 个字段的顺序必须与 hle_nvn_boot.c 的 dm_guest_boot_plan 完全相同 !!
    （两处独立定义是隐患，理想做法是提到一个头文件里共用。） */
 
-/* nnosInitialize 的 x0 是「主线程的 ThreadType*」：
-   真机上由 rtld/kernel 提供。宿主不跑 rtld、也不做线程对象层，给一块
-   **零填充的、客体可见的内存**即可 —— SDK 只是把它存进全局，后续 nn::os 调用
-   会拿它来找宿主实现（我们那边按对象地址记账）。 */
-static unsigned char g_main_thread_type[0x200] __attribute__((aligned(16)));
+/* nnosInitialize 的 x0 是「主线程句柄」（第 55 轮改，.ips 实证的崩溃链）：
+ * D2R 的 main.c 传的是 svc_thread_main_init() 返回的句柄（其句柄表 0x1000+i
+ * 的第一个 = 0x1001）。SDK 把它存进全局，ThreadManagerImplByHorizon 的构造函数
+ * （sdk+0x147f4c，本次 .ips 栈帧 #7 所在函数）拿它去调 GetThreadPriority /
+ * GetProcessId。第 54 轮及之前我们传的是一块零填充内存的**地址** —— SDK 把
+ * 地址低 32 位当句柄用，语义完全不对。宿主侧 svc 实现目前不校验句柄，
+ * 值自洽即可；取与 D2R 相同的 0x1001。 */
+#define DM_MAIN_THREAD_HANDLE 0x1001ull
+
+/* SDK 自己的 ThreadType 是 0x470+ 字节（ThreadManager 构造里 memset 0x470、
+ * 字段写到 +0x418）。这块缓冲只是「万一有路径对它写」的保险，给足 0x800。 */
+static unsigned char g_main_thread_type[0x800] __attribute__((aligned(16)));
 
 /* 主体：真正的“进客体”逻辑。放在单独函数里，是为了让 dm_host_enter_guest
    只承担「调一次」的职责，便于以后加诊断。 */
@@ -115,7 +122,6 @@ static void guest_main(void) {
      */
     typedef void (*fn0)(void);
     typedef void (*fn2)(uint64_t, uint64_t);   /* nnosInitialize(主线程句柄, 0) */
-
     /* !! 五步都打诊断标记（第 45 轮加）!!
      * 为什么重要：客体**跑在主线程上**，它一旦不返回，屏幕上的字就再也不会更新
      * （CADisplayLink 的回调卡在这里面）。所以这五条标记写的是**日志文件**，
@@ -147,7 +153,7 @@ static void guest_main(void) {
 
     if (P->os_initialize) {
         dm_diag_stage(2, "调用 nnosInitialize（SDK 运行时；x0=主线程句柄）");
-        ((fn2)P->os_initialize)((uint64_t)(uintptr_t)g_main_thread_type, 0);
+        ((fn2)P->os_initialize)(DM_MAIN_THREAD_HANDLE, 0);
         dm_diag_stage(2, "nnosInitialize 已返回");
     } else {
         dm_diag_stage(2, "**没有 nnosInitialize 符号**");

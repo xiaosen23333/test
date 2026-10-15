@@ -58,6 +58,7 @@
 #include "hle_nvn_cmd.h"
 #include "hle_nvn_metal.h"
 #include "hle_diag.h"     /* 诊断通道（hle_diag.c）：日志文件 + 一行总览 */
+#include "hle_plat.h"     /* 第 55 轮：dm_plat_dump_slots_crash（崩溃时倾倒线程槽） */
 
 /* 宿主侧入口（由 work/host/ 提供） */
 extern int   dm_host_boot(const char *romfs_dir, const char *save_dir);  /* 装载 + 初始化 */
@@ -334,6 +335,7 @@ static void dm_crash_handler(int sig, siginfo_t *info, void *uctx) {
     (void)uctx;
 #endif
     dm_diag_crash_line(sig, fault, pc, lr, sp, xs, 4);
+    dm_plat_dump_slots_crash();   /* 第 55 轮：线程槽实值 vs 应填值（PrepareAbort 类崩溃的判据） */
 
     /* 恢复默认处理再重发 —— 让系统照常生成崩溃报告，别把进程留在半死状态 */
     signal(sig, SIG_DFL);

@@ -26,6 +26,15 @@ void dm_plat_set_current_thread(void *thread_type);
 /* 装过几次（诊断：正常进客体前应为 1） */
 int  dm_plat_tls_install_count(void);
 
+/* 崩溃 handler 里调（第 55 轮）：把 4 个线程槽的「应填值 vs 裸读实值」写进日志。
+ * 只做读 + 手写格式化 + write(2)，信号处理安全。 */
+void dm_plat_dump_slots_crash(void);
+
 #endif /* aarch64 */
+
+/* 非 aarch64 目标给空实现，调用点不用包 #if */
+#if !defined(__aarch64__) && !defined(_M_ARM64)
+static inline void dm_plat_dump_slots_crash(void) { }
+#endif
 
 #endif /* DM_HLE_PLAT_H */

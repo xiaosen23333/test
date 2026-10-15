@@ -87,6 +87,10 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
                         unsigned long long pc, unsigned long long lr,
                         unsigned long long sp, const unsigned long long *x, int nx);
 
+/* 崩溃路径上追加一段现成的文本（第 55 轮：hle_plat 的槽倾倒用）。
+ * 同样只 write()，信号安全；n = 字节数（不含终止符也行）。 */
+void dm_diag_append_crash_text(const char *s, int n);
+
 /* ---- 门调用记录（第 47 轮加）----
  * 客体每次经门（svc / 读 cntpct）进宿主时记下返回点。用处：
  * 崩溃/卡死时能看到最后几个门调用是**哪些客体站点** —— 用来区分

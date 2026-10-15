@@ -115,21 +115,17 @@ static const char *svc_name(uint32_t n) {
 
 /* 该调用的 x0 是「结果码」还是「返回值」？
  *
- * Horizon 的惯例：多数调用 x0 = 结果码（0 = 成功），返回值在 x1；
- * 但有一部分调用的 x0 **本身就是返回值**（没有结果码）。
- * 分错了会导致客体把有效数据当成错误码，或把错误码当成句柄。
- * 下表按 Horizon 的 svc 手册逐条登记 —— 这是必须查准的地方，不能想当然。
+ * Horizon 的惯例：**除下面两条外，全部 svc 的 x0 = 结果码（0 = 成功）**，
+ * 输出值走 x1..x7（带输出参数的 Get* 尤其如此 —— D2R 的 hle_thread.c 同款）。
+ * 第 55 轮真机教训：曾把 0x0c/0x25/0x26 判成「x0 = 值」，于是
+ * GetThreadPriority 返回 x0=0x2C 被客体当错误码 → SDK 走进
+ * nn::diag::detail::Abort → PrepareAbort 写 TLR+0x100 → 崩溃（.ips 实证）。
  */
 static int x0_is_result_code(uint32_t n) {
     switch (n) {
-    /* x0 = 返回值（无结果码） */
+    /* x0 = 返回值（无结果码）—— 只有这两个 */
     case 0x10:  /* GetCurrentProcessorNumber */
-    case 0x16:  /* CloseHandle */
-    case 0x0c:  /* GetThreadPriority */
     case 0x1e:  /* GetSystemTick */
-    case 0x25:  /* GetProcessId */
-    case 0x26:  /* GetThreadId */
-    case 0x49:  /* QueryIoMapping（x0..x2 都是输出） */
         return 0;
     default:
         return 1;
@@ -145,21 +141,56 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
     case 0x10:  /* GetCurrentProcessorNumber —— x0 就是编号 */
         r[DM_REG_X0] = 0;
         return 0;
-    case 0x25:  /* GetProcessId —— x0 就是 pid */
-        r[DM_REG_X0] = 1;
+    /* ---- 以下全部是「x0 = 结果码、值在 x1..x2」（第 55 轮按 D2R hle_thread.c 核对）---- */
+    case 0x0c:  /* GetThreadPriority(句柄) —— x1 = 优先级 */
+        r[DM_REG_X0] = 0; r[DM_REG_X1] = 0x2C;
         return 0;
-    case 0x26:  /* GetThreadId —— x0 就是 tid */
-        r[DM_REG_X0] = 1;
-        return 0;
-    case 0x16:  /* CloseHandle —— x0 = 0 表示成功关闭 */
+    case 0x0d:  /* SetThreadPriority */
         r[DM_REG_X0] = 0;
         return 0;
-    case 0x0c:  /* GetThreadPriority —— x0 = 优先级 */
-        r[DM_REG_X0] = 0x2C;    /* Horizon 默认普通优先级 */
+    case 0x0e:  /* GetThreadCoreMask —— x1 = 理想核，x2 = 核掩码 */
+        r[DM_REG_X0] = 0; r[DM_REG_X1] = 0; r[DM_REG_X2] = 7;
+        return 0;
+    case 0x0f:  /* SetThreadCoreMask：宿主只记账，如实回成功 */
+        r[DM_REG_X0] = 0;
+        return 0;
+    case 0x25:  /* GetProcessId(句柄) —— x1 = 进程号 */
+        r[DM_REG_X0] = 0; r[DM_REG_X1] = 1;
+        return 0;
+    case 0x26:  /* GetThreadId(句柄) —— x1 = 线程号 */
+        r[DM_REG_X0] = 0; r[DM_REG_X1] = 1;
+        return 0;
+    case 0x16:  /* CloseHandle —— x0 = 结果码 */
+        r[DM_REG_X0] = 0;
         return 0;
     case 0x29:  /* OutputDebugString */
         return 0;
     case 0x0b:  /* SleepThread —— 纳秒在 x1，负值 = yield */
+        return 0;
+    case 0x1a: {  /* ArbitrateLock(w0 持锁者, x1 锁地址, w2 本线程标签) —— 第 55 轮加 */
+        volatile uint32_t *w = (volatile uint32_t *)r[DM_REG_X1];
+        uint32_t v = *w;
+        if (v == (uint32_t)r[DM_REG_X0] || v == 0) {
+            *w = (uint32_t)r[DM_REG_X2];   /* 内核语义：等到 *addr==owner 后写入自己的标签 */
+            r[DM_REG_X0] = 0;
+        } else {
+            /* 标签字协议（D2R hle_thread.c）：持有者句柄 | 0x40000000(有等待者)。
+               单线程引导期 SDK 的用户态 CAS 成功就不会进这里；真争用说明有多线程了，
+               那时必须换成 D2R 的完整等待层。拒答会触发 nn::diag::Abort（本次崩溃链），
+               所以记录后放行。 */
+            static unsigned n_log;
+            if (n_log++ < 8)
+                dm_diag_mark("[svc] ArbitrateLock 争用：*%llx=%x 期待=%x —— 放行（单线程下不应发生）",
+                             (unsigned long long)r[DM_REG_X1], (unsigned)v,
+                             (unsigned)r[DM_REG_X0]);
+            *w = (uint32_t)r[DM_REG_X2];
+            r[DM_REG_X0] = 0;
+        }
+        return 0; }
+    case 0x1b:  /* ArbitrateUnlock(x0 锁地址)：还没有等待者追踪，直接清零
+                   （= D2R lock_handoff 在「无等待者」时的行为） */
+        *(volatile uint32_t *)r[DM_REG_X0] = 0;
+        r[DM_REG_X0] = 0;
         return 0;
     default:
         return -1;

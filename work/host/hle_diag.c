@@ -321,3 +321,12 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
     }
 #endif
 }
+
+void dm_diag_append_crash_text(const char *s, int n) {
+    if (!s || n <= 0) return;
+#if defined(__unix__) || defined(__APPLE__)
+    if (g_logfd >= 0) { ssize_t w = write(g_logfd, s, (size_t)n); (void)w; }
+#else
+    if (g_log) { fwrite(s, 1, (size_t)n, g_log); fflush(g_log); }
+#endif
+}

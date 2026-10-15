@@ -20,6 +20,8 @@
 /* regs[0..30] = x0..x30；regs[31] 保留（不用）。 */
 #define DM_REG_COUNT 31
 #define DM_REG_X0    0
+#define DM_REG_X1    1
+#define DM_REG_X2    2
 #define DM_REG_X8    8
 #define DM_REG_X29   29
 #define DM_REG_X30   30
