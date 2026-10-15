@@ -91,10 +91,14 @@ static const char *svc_name(uint32_t n) {
         [0x19]="CancelSynchronization", [0x1a]="ArbitrateLock", [0x1b]="ArbitrateUnlock",
         [0x1c]="WaitProcessWideKeyAtomic", [0x1d]="SignalProcessWideKey",
         [0x1e]="GetSystemTick", [0x1f]="ConnectToNamedPort",
+        /* 第 59 轮按 switchbrew SVC 表 + D2R hle_svc.c/hle_thread.c 对齐（本段编号之前
+           错位了一位：Break/ODS 曾被记成 0x27/0x28，真号是 0x26/0x27；见 [svc] 日志的核对） */
+        [0x20]="SendSyncRequestLight",
         [0x21]="SendSyncRequest", [0x22]="SendSyncRequestWithUserBuffer",
-        [0x23]="SendAsyncRequestWithUserBuffer", [0x25]="GetProcessId", [0x26]="GetThreadId",
-        [0x27]="Break", [0x28]="OutputDebugString", [0x29]="GetInfo", [0x2b]="ConnectToPort",
-        [0x2c]="SetProcessMemoryPermission", [0x2d]="MapProcessMemory",
+        [0x23]="SendAsyncRequestWithUserBuffer", [0x24]="GetProcessId", [0x25]="GetThreadId",
+        [0x26]="Break", [0x27]="OutputDebugString", [0x28]="ReturnFromException",
+        [0x29]="GetInfo", [0x2a]="FlushEntireDataCache", [0x2b]="FlushDataCache",
+        [0x2c]="MapPhysicalMemory", [0x2d]="UnmapPhysicalMemory",
         [0x2f]="UnmapProcessMemory", [0x30]="QueryProcessMemory",
         [0x32]="TerminateProcess", [0x33]="GetProcessList", [0x34]="GetThreadList",
         [0x35]="GetSystemInfo", [0x36]="GetSystemInfo2",
@@ -133,7 +137,8 @@ static int x0_is_result_code(uint32_t n) {
     }
 }
 
-/* svc 实现：返回 0 = 已处理（regs 已写好内容）；非 0 = 未实现 */
+/* svc 实现：返回 0 = 已处理（regs 已写好内容）；2 = 未实现（dispatch 按「假成功」
+   x0=0 处理并记日志）。-1 这个旧语义（未实现→错误码）第 59 轮已弃用。 */
 static int host_svc_impl(uint64_t *r, uint32_t n) {
     switch (n) {
     case 0x1e:  /* GetSystemTick —— x0 就是 tick 值 */
@@ -187,49 +192,108 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         return 0;
     case 0x1f: {  /* ConnectToNamedPort(name=x1) → x1=会话句柄（第 58 轮）。
                      目前只认 "sm:"：SDK 的 nn::sm 初始化带 50ms 重试循环
-                     （sdk+0x15900c，连上后只查 svc 返回值，不解析应答缓冲）。 */
+                     （sdk+0x15900c，连上后只查 svc 返回值，不解析应答缓冲）。
+                     第 59 轮：名字指针先做下限检查（小整数/近零地址一律当不存在）——
+                     「把某样东西当指针读」正是这一轮崩溃的教训。 */
         const char *name = (const char *)r[DM_REG_X1];
         static int n_sm;
-        if (name && name[0] == 's' && name[1] == 'm' && name[2] == ':' && name[3] == 0) {
+        if ((uintptr_t)name > 0x10000 &&
+            name[0] == 's' && name[1] == 'm' && name[2] == ':' && name[3] == 0) {
             if (n_sm++ < 3) dm_diag_mark("[sm:] 连接 \"sm:\" → 成功（假会话，IPC 只回成功）");
             r[DM_REG_X0] = 0;
             r[DM_REG_X1] = 0xC0000001ull + (unsigned)n_sm;
         } else {
             char nb[12]; int k = 0;
-            for (; name && name[k] && k < 8; k++) nb[k] = name[k];
+            if ((uintptr_t)name > 0x10000)
+                for (; name[k] && k < 8; k++) nb[k] = name[k];
             nb[k] = 0;
             dm_diag_mark("[端口] ConnectToNamedPort(\"%s\") → 不存在", nb);
             r[DM_REG_X0] = 0xE701ull;      /* NoSuchPort */
         }
         return 0; }
-    case 0x20: case 0x21: {  /* SendSyncRequest [WithUserBuffer]（第 58 轮）。
-                               回成功；把消息头记进诊断 —— CMIF 请求 magic 'SFCI'
-                               后面跟命令号，下轮需要应答时照这个补。 */
-        uint64_t buf = (n == 0x21) ? r[DM_REG_X0] : 0;
-        uint64_t sess = (n == 0x21) ? r[DM_REG_X2] : r[DM_REG_X0];
-        static unsigned n_ipc;
-        if (n_ipc++ < 24) {
-            unsigned w0 = 0, w1 = 0, w2 = 0, w3 = 0;
-            if (buf) {
-                w0 = *(volatile unsigned *)buf;
-                w1 = *((volatile unsigned *)buf + 1);
-                w2 = *((volatile unsigned *)buf + 2);
-                w3 = *((volatile unsigned *)buf + 3);
+    case 0x20:   /* SendSyncRequestLight(句柄=x0)：与 0x21 同形，只是不走「会话打开态」检查 */
+    case 0x21: { /* SendSyncRequest(句柄=x0) —— 第 59 轮修正（此前把 0x21 当 WithUserBuffer，是崩溃直接原因）。
+                     .ips 实证（r59）：ConnectToNamedPort 返回的会话句柄 0xC0000002 被客体原样放进
+                     x0 调本调用；上一版却去读「x0 指向的缓冲」→ SIGSEGV，故障地址 = 0xC0000002
+                     （.ips：esr 是 svc、崩溃指令 ldr w10,[x9]、x9 = 句柄本身）。
+                     switchbrew SVC 表：0x21 = SendSyncRequest(Handle)（**无缓冲参数**）；
+                     0x22 才是 SendSyncRequestWithUserBuffer(buf, size, handle)。
+                     ==> 本调用**绝不碰内存**，只回成功（与 D2R hle_svc.c 的默认分支同语义）。
+                     诊断：请求消息就在「本线程 TLR 头 0x100 字节」（Horizon 的线程本地 IPC
+                     命令缓冲）——抄出来看 sm: 在请求什么（下一步要做真应答时的关键线索）。 */
+        uint64_t sess = r[DM_REG_X0];
+        static unsigned n_ssr;
+        if (n_ssr++ < 16) {
+            uint64_t tlr = dm_plat_tlr_addr();
+            if (tlr) {
+                /* 注意：dm_diag_mark 的缓冲 192 字节 —— 只抄 6 个 word（够覆盖
+                   CMIF 头：magic/版本/命令号/参数），别把行撑爆被截断。 */
+                volatile unsigned *w = (volatile unsigned *)tlr;
+                dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) ok；TLR头=%08x %08x %08x %08x %08x %08x",
+                             n, (unsigned long long)sess,
+                             w[0], w[1], w[2], w[3], w[4], w[5]);
+            } else {
+                dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) → 成功", n,
+                             (unsigned long long)sess);
             }
-            dm_diag_mark("[ipc] 会话=%llx buf=%llx 头=%08x %08x %08x %08x",
-                         (unsigned long long)sess, (unsigned long long)buf, w0, w1, w2, w3);
         }
         r[DM_REG_X0] = 0;
         return 0; }
-    case 0x27: {  /* Break(reason, ptr, size)：SDK 致命中止意图 —— 只记不放行崩溃
-                     （真致命时 SDK 自己会走 diag Abort，那里有完整停车+门历史） */
+    case 0x22: { /* SendSyncRequestWithUserBuffer(buf=x0, size=x1, 句柄=x2) —— 第 59 轮加。
+                     真语义下 buf 确实是用户缓冲；但 0x21 的教训还热着，本轮**先不 deref**：
+                     只记录三个入参，等真机日志确认它确实被调用、且 buf 像真实指针后
+                     再上内容读取（宁可少一个诊断，也不要再崩在「把值当指针」上）。 */
+        static unsigned n_wub;
+        if (n_wub++ < 16)
+            dm_diag_mark("[ipc] svc22 WithUserBuffer 会话=%llx buf=%llx size=%llx（暂不读内容）",
+                         (unsigned long long)r[DM_REG_X2], (unsigned long long)r[DM_REG_X0],
+                         (unsigned long long)r[DM_REG_X1]);
+        r[DM_REG_X0] = 0;
+        return 0; }
+    case 0x23:   /* SendAsyncRequestWithUserBuffer：先只回成功、不碰内存（出现再说） */
+        r[DM_REG_X0] = 0;
+        return 0;
+    case 0x24:   /* GetProcessId(句柄) —— 真号 0x24（第 59 轮修正：之前记在 0x25） */
+        r[DM_REG_X0] = 0; r[DM_REG_X1] = 1;
+        return 0;
+    case 0x25:   /* GetThreadId(句柄) —— 真号 0x25（第 59 轮修正：之前 0x25 记的是 GetProcessId）。
+                    宿主线程层还没做 id 表，先给自洽的值 1（SDK 只做簿记/断言用）。 */
+        r[DM_REG_X0] = 0; r[DM_REG_X1] = 1;
+        return 0;
+    case 0x26: {  /* Break(reason, ptr, size) —— 真号 0x26（第 59 轮修正：之前记成 0x27）。
+                     只记不拦（真致命时 SDK 自己会走 diag Abort，那里有完整停车+门历史）。
+                     注：D2R 对低值 reason 直接 _exit(42) 快速失败；我们选择记录后放行 ——
+                     让宿主带着状态继续跑能多拿日志，真 Abort 时日志会点名它。 */
         static int n_br;
         if (n_br++ < 5) dm_diag_mark("[Break] reason=%llx ptr=%llx",
                                      (unsigned long long)r[DM_REG_X0],
                                      (unsigned long long)r[DM_REG_X1]);
         r[DM_REG_X0] = 0;
         return 0; }
-    case 0x28:  /* OutputDebugString(str, len) */
+    case 0x27: {  /* OutputDebugString(str, len) —— 真号 0x27（第 59 轮修正：之前记成 0x28）。
+                     SDK 的内部报错/警告走这条路；抄进日志（限频 20 行、限长 95、
+                     指针下限 + 长度上限检查 —— 读之前先确认它像个真字符串）。 */
+        const char *s = (const char *)r[DM_REG_X0];
+        uint64_t len = r[DM_REG_X1];
+        static int n_ods;
+        if (n_ods++ < 20) {
+            if ((uintptr_t)s > 0x10000 && len > 0 && len <= 4096) {
+                char t[96]; int k = 0;
+                for (; (uint64_t)k < len && k < 95 && s[k]; k++) t[k] = s[k];
+                t[k] = 0;
+                dm_diag_mark("[客体输出] %s", t);
+            } else {
+                dm_diag_mark("[客体输出] （str=%llx len=%llu 不像字符串，不读）",
+                             (unsigned long long)r[DM_REG_X0], (unsigned long long)len);
+            }
+        }
+        r[DM_REG_X0] = 0;
+        return 0; }
+    case 0x28:   /* ReturnFromException（void）—— 真号 0x28（第 59 轮修正） */
+        r[DM_REG_X0] = 0;
+        return 0;
+    case 0x2a:   /* FlushEntireDataCache（void）：宿主不需要做 */
+    case 0x2b:   /* FlushDataCache(addr, size) */
         r[DM_REG_X0] = 0;
         return 0;
     case 0x29: {  /* GetInfo(id=x1, handle=x2, subid=x3) → x1 = 值（第 58 轮照 D2R 补全。
@@ -273,12 +337,6 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
     case 0x0f:  /* SetThreadCoreMask：宿主只记账，如实回成功 */
         r[DM_REG_X0] = 0;
         return 0;
-    case 0x25:  /* GetProcessId(句柄) —— x1 = 进程号 */
-        r[DM_REG_X0] = 0; r[DM_REG_X1] = 1;
-        return 0;
-    case 0x26:  /* GetThreadId(句柄) —— x1 = 线程号 */
-        r[DM_REG_X0] = 0; r[DM_REG_X1] = 1;
-        return 0;
     case 0x16:  /* CloseHandle —— x0 = 结果码 */
         r[DM_REG_X0] = 0;
         return 0;
@@ -312,7 +370,13 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         r[DM_REG_X0] = 0;
         return 0;
     default:
-        return -1;
+        /* 第 59 轮：未实现的调用 → 按「占位返回成功」处理（**不再回 x0=-1**）。
+           理由（三次真机事故的教训）：r55 Abort 崩溃 / r57 停车挂起 / 都由「SDK 拿到
+           非 0 结果码 → 走错误路径」触发。D2R hle_svc.c 的默认分支就是回成功
+           （regs[0]=0）——这是真机验证过的策略。诊断层（dm_gate_dispatch）会把
+           「未实现→假成功」的调用号全部点名，后续逐个补真实现。
+           返回 2 = 「未实现（已按假成功处理）」，dispatch 据此写 x0=0 并记日志。 */
+        return 2;
     }
 }
 
@@ -321,6 +385,10 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
 void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs) {
     /* 记下这一笔（便宜的一次数组写）：卡死/崩溃时靠它看出最后几个门是哪些客体站点 */
     dm_diag_gate(ret);
+    /* 第 59 轮：运行期槽核对 + 自愈（发现被改写就恢复并记日志）。真机日志里 K18 槽
+       运行中变 0，但没抓到是谁写的 —— 先在这里设保险（每门 4 次槽读，L1 级开销）。
+       Windows 自测是空桩（hle_plat.h）。 */
+    dm_plat_slots_guard(ret);
 
     const dm_gate_ent *e = dm_host_find(h, ret);
     if (!e) {
@@ -348,26 +416,30 @@ void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs) {
                若是「返回值」（如 GetSystemTick），保留实现写的数据。 */
             if (x0_is_result_code(e->arg)) regs[DM_REG_X0] = 0;
         } else {
-            /* 未实现的调用：给一个「未实现」的结果码（x0 非 0），
-               避免客体把垃圾当成有效句柄继续用。诊断里计数。 */
-            regs[DM_REG_X0] = (uint64_t)-1;
+            /* 未实现（rc==2）或异常（rc 其它值）：**照 D2R 占位返回成功** ——
+               只写 x0=0，不动其它寄存器（理由见 host_svc_impl default 的长注释）。 */
+            regs[DM_REG_X0] = 0;
+            rc = 2;
         }
-        /* 第 57 轮：svc 分发诊断（限频）—— 真机日志直接点名
-           「哪个 svc 被调、实现没、x0 出了什么」。
-           起因：r56 卡死在 ThreadManagerImplByHorizon 构造，真凶是
-           svc 6 QueryMemory 未实现 —— 之前只能靠反汇编猜。 */
+        /* 第 57 轮：svc 分发诊断 —— 真机日志直接点名「哪个 svc 被调、实现没、x0 出了什么」。
+           第 59 轮改成「按调用号限频（每号最多 3 行）＋标注『未实现→假成功』」：
+           既不刷爆日志，也能一眼列出本运行踩到的所有未实现调用（含名字与站点）。 */
         {
-            static unsigned n_svc_diag;
-            if (n_svc_diag < 60) {
-                n_svc_diag++;
+            static unsigned char seen[256];
+            unsigned key = e->arg & 0xff;
+            if (seen[key] < 3) {
+                seen[key]++;
                 char nm[40];
-                if (rc == 0 && x0_is_result_code(e->arg) && regs[DM_REG_X0] == 0)
-                    dm_diag_mark("[svc] %u (%s) 成功 x1=%llx", e->arg,
-                                 dm_diag_addr(ret, nm, (int)sizeof nm) ? nm : "?",
+                const char *sn = svc_name(e->arg);
+                const char *st = dm_diag_addr(ret, nm, (int)sizeof nm) ? nm : "?";
+                if (rc == 2)
+                    dm_diag_mark("[svc] %u %s (%s) **未实现→假成功**（x0=0；x1=%llx 原样）",
+                                 e->arg, sn, st, (unsigned long long)regs[DM_REG_X1]);
+                else if (x0_is_result_code(e->arg) && regs[DM_REG_X0] == 0)
+                    dm_diag_mark("[svc] %u %s (%s) 成功 x1=%llx", e->arg, sn, st,
                                  (unsigned long long)regs[DM_REG_X1]);
                 else
-                    dm_diag_mark("[svc] %u (%s) rc=%d x0出=%llx", e->arg,
-                                 dm_diag_addr(ret, nm, (int)sizeof nm) ? nm : "?",
+                    dm_diag_mark("[svc] %u %s (%s) rc=%d x0出=%llx", e->arg, sn, st,
                                  rc, (unsigned long long)regs[DM_REG_X0]);
             }
         }

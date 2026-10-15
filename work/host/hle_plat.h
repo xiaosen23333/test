@@ -30,6 +30,18 @@ int  dm_plat_tls_install_count(void);
  * 只做读 + 手写格式化 + write(2)，信号处理安全。 */
 void dm_plat_dump_slots_crash(void);
 
+/* 第 59 轮：运行期槽核对 + 自愈（每次门调用时调一次）。发现 4 槽里任何一个是
+ * 「非应填值」（第 59 轮真机：K18 槽在运行中变成 0，而启动时核对是好的）就立刻
+ * 恢复成应填值，并把「第一次发生」连触发门一起记进日志。
+ * 成本：每门 4 次槽读 + 比较（L1 级，可忽略）。 */
+void dm_plat_slots_guard(uint64_t ret);
+
+/* 第 59 轮：当前线程的 ThreadLocalRegion 地址（= KTLR 槽里的值）。没装槽时 0。
+ * 用途：svc 0x21 SendSyncRequest 的请求消息就放在「本线程 TLR 的头 0x100 字节」
+ * （Horizon 的线程本地 IPC 命令缓冲）——诊断里抄出来，下一轮日志就能看到
+ * sm: 会话到底在请求什么（命令号是 sm: 协议的核心线索）。 */
+uint64_t dm_plat_tlr_addr(void);
+
 /* ---- 客体线程与堆（第 57 轮加，svc 1/8/9/0A 用；照 D2R hle_svc.c / hle_thread.c 语义）---- */
 
 /* SetHeapSize：预留/扩出客体堆。size = 期望字节数；成功 *base_out = 堆基址。
@@ -53,6 +65,8 @@ void dm_plat_heap_peek(uint64_t *base, uint64_t *cap, uint64_t *cur);
  * MSVC 的 C 模式对 inline 支持不稳，直接用 static（未用会有警告但不报错）。 */
 #if !defined(__aarch64__) && !defined(_M_ARM64)
 static void dm_plat_dump_slots_crash(void) { }
+static void dm_plat_slots_guard(uint64_t ret) { (void)ret; }
+static uint64_t dm_plat_tlr_addr(void) { return 0; }
 static int  dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
     (void)size; if (base_out) *base_out = 0x10000000ull; return 0;   /* 自测用假堆 */
 }

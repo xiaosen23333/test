@@ -35,7 +35,9 @@ $TESTS = @(
   @{ n='boot_selftest';      a=@($OUT, $GAME) }
   @{ n='loader_selftest';    a=@($OUT) }
   @{ n='boot_syms_selftest'; a=@($OUT) }
-  @{ n='host_selftest';      a=@("$OUT\main.gates.tsv") }
+  # 第 59 轮：之前只传 main.gates.tsv —— 而 main 模块没有 svc 门（表里只有注释），
+  # 整项测试其实在空转（假绿灯）。现改为 sdk（101 条真实门）+ rtld + main 三个都跑。
+  @{ n='host_selftest';      a=@("$OUT\sdk.gates.tsv", "$OUT\rtld.gates.tsv", "$OUT\main.gates.tsv") }
   @{ n='nn_selftest';        a=@($GAME) }
   @{ n='entry_selftest';     a=@($OUT) }
   @{ n='tlsdesc_selftest';   a=@($OUT) }

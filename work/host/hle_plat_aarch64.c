@@ -84,6 +84,12 @@ typedef struct {
     unsigned char tls[DM_TLS_BLOCK];        /* musl TLS（K18 / KTLS 指向它） */
     unsigned char tlr[DM_TLR_BLOCK];        /* ThreadLocalRegion（KTLR） */
     int           installed;
+    /* 第 59 轮：本线程 4 槽的「偏移（键号×8）」与「应填值」——运行期核对/自愈用。
+       全局那两份（见下面的 g_key_nums）会被「最后装槽的线程」覆盖，多线程时
+       崩溃倾倒里读到的「应填」未必是崩溃线程的；本线程块里这一份永远准。 */
+    unsigned long long key_ofs[DM_KEY_COUNT];
+    unsigned long long want[DM_KEY_COUNT];
+    unsigned          run_bad;              /* 运行期发现被改写的次数（限频日志） */
 } dm_thread_tls;
 
 /* 本线程的块存哪儿：另用一个 pthread 键存指针（与那 4 个键不冲突） */
@@ -217,6 +223,13 @@ void dm_plat_tls_install(void) {
     g_want_vals[DM_KEY_KTLR] = (unsigned long long)tp_tlr;
     g_want_vals[DM_KEY_KGATE]= (unsigned long long)dm_gate;
 
+    /* 第 59 轮：同一份数据也记进「本线程块」——dm_plat_slots_guard（运行期核对/自愈）
+       用的就是这一份，多线程下不受别的线程装槽影响。 */
+    for (int i = 0; i < DM_KEY_COUNT; i++) {
+        b->key_ofs[i] = g_key_nums[i];
+        b->want[i]    = g_want_vals[i];
+    }
+
     /* 直通槽读回核对（第 55 轮诊断）：改写后的客体按「tpidrro_el0 + 8×键号」裸读，
      * 不经过 pthread_getspecific。这里用同一条路读回 —— 若不一致，说明 Darwin 的
      * 直通槽假设在这个键号上不成立，必须在进客体前发现（第 55 轮 .ips：
@@ -252,6 +265,41 @@ void dm_plat_tls_install(void) {
 
 /* 单调递增的「装过几次」计数（诊断用） */
 int dm_plat_tls_install_count(void) { return g_tls_installs; }
+
+/* ---------------- ①c 运行期槽核对 + 自愈（第 59 轮） ----------------
+ *
+ * 真机现象（第 59 轮的 .ips）：启动时「槽读回核对：一致」，但崩溃倾倒里
+ * K18 槽已经变成 0（应填 0x112000100）。谁写的还没抓到——在抓到之前先设保险：
+ * 客体每次经门进宿主时核对 4 个槽，发现 ≠应填值就**立刻恢复**，并把
+ * 「第一次发生」连触发门一起记进日志（下一轮真机日志会给出时间点）。
+ * 用「本线程块」里的 key_ofs/want（多线程安全），不用被覆盖的全局那份。 */
+void dm_plat_slots_guard(uint64_t ret) {
+    if (!g_keys_ready || !g_block_key_ready) return;
+    dm_thread_tls *b = (dm_thread_tls *)pthread_getspecific(g_block_key);
+    if (!b || !b->key_ofs[DM_KEY_K18]) return;
+    static const char *nm[DM_KEY_COUNT] = { "K18", "KTLS", "KTLR", "KGATE" };
+    unsigned long long tp = rd_tpidrro_raw();
+    for (int i = 0; i < DM_KEY_COUNT; i++) {
+        volatile unsigned long long *cell = (unsigned long long *)(tp + b->key_ofs[i]);
+        unsigned long long got = *cell;
+        if (got != b->want[i]) {
+            *cell = b->want[i];                 /* 自愈 */
+            if (b->run_bad < 8) {
+                b->run_bad++;
+                dm_diag_mark("[槽] %s 运行中被改写：%llx → 已恢复 %llx（触发门 ret=%llx）",
+                             nm[i], got, b->want[i], (unsigned long long)ret);
+            }
+        }
+    }
+}
+
+/* 当前线程的 TLR 地址（= KTLR 槽里的值）。用途见 hle_plat.h。 */
+uint64_t dm_plat_tlr_addr(void) {
+    if (!g_keys_ready) return 0;
+    unsigned long long off = g_key_nums[DM_KEY_KTLR];
+    if (!off) return 0;
+    return *(unsigned long long *)(rd_tpidrro_raw() + off);
+}
 
 
 /* ---------------- ⑤ 客体堆（svc 1 SetHeapSize，第 57 轮加；D2R hle_svc.c 0x01 同语义） -----

@@ -1,11 +1,18 @@
 ﻿/* 宿主门分发的自测 —— 在 Windows 上直接验证 C 侧逻辑（不需要 aarch64 环境）。
  *
- * 用真实的 gates.tsv（改写器产出）驱动：
- *   1. 装载门表，核对条数与「返回点 → 类别/参数」映射
- *   2. 对每个 svc 门：喂一组寄存器，核对分发改到了 svc 分支
- *   3. 对每个 cntpct/cntvct 门：核对**结果写进了 arg 指定的寄存器**
- *      （这是关键 —— 目标可以是任意 xN，实测有 x19..x23）
- *   4. 对未登记的返回点：核对不改任何寄存器
+ * 用真实的 gates.tsv（改写器产出）驱动；**命令行上给的每个门表文件都独立跑一遍**。
+ * （第 59 轮修：之前只传 main.gates.tsv，而它只有注释、0 条门 —— 整项测试在空转，
+ *   是一盏假绿灯。现在由 build_all.ps1 传 sdk/rtld/main 三个，sdk 有 101 条门。）
+ *
+ * 判据：
+ *   0. 门表装载：返回点唯一
+ *   1. svc 门分发：喂一组寄存器，核对确实分发到了 svc 分支
+ *   2. cntpct/cntvct 门：**结果写进 arg 指定的寄存器**（目标可以是任意 xN）
+ *   3. 未登记的返回点：不改任何寄存器
+ *   4. x0 的语义：GetSystemTick(0x1e) 是「返回值」、CloseHandle(0x16) 是「结果码」
+ *   5. 未实现的调用 → 假成功（x0=0、其它寄存器原样；第 59 轮策略，防 SDK 错误路径）
+ *   6. **句柄不是指针**：svc 0x21/0x22 收到会话句柄值（0xC0000002）时绝不许 deref
+ *      —— deref 的话本测试进程当场崩（正是第 59 轮真机 .ips 的复现）
  *
  * 打印一律用 ASCII（Windows 控制台代码页不可控，中文会乱码）。
  */
@@ -14,30 +21,27 @@
 #include <stdio.h>
 #include <string.h>
 
-static uint64_t g_fake_ticks = 0;
 static int g_svc_seen[256];
 
-/* 模拟的系统调用实现：只记录被调到（不写 x0 —— x0 由分发器按语义决定）。
- * 对 0x1e（GetSystemTick）这类「x0 即返回值」的调用，实现要写 x0；
- * 对结果是「结果码」的调用，分发器会在成功时把 x0 置 0。 */
+/* 模拟的系统调用实现：只记录被调到（不写 x0 —— x0 由分发器按语义决定）。 */
 static int test_svc(uint64_t *r, uint32_t n) {
     (void)r;
     if (n < 256) g_svc_seen[n]++;
     return 0;
 }
 
-int main(int argc, char **argv) {
-    const char *path = (argc > 1) ? argv[1] : "gates.tsv";
+/* ---- 单个门表文件：跑全部判据，返回 mismatch 总数 ---- */
+static int run_file(const char *path) {
     static dm_gate_ent tab[4096];
     dm_host h;
     memset(&h, 0, sizeof h);
     h.svc = test_svc;
 
+    printf("---- gates: %s ----\n", path);
     if (dm_host_load_gates(&h, tab, sizeof tab / sizeof tab[0], path)) {
-        printf("load %s failed\n", path);
+        printf("  load failed\n\n");
         return 1;
     }
-    printf("=== gate table ===\n");
     printf("  entries: %zu\n", h.n);
 
     int n_svc = 0, n_cp = 0, n_cv = 0;
@@ -50,18 +54,17 @@ int main(int argc, char **argv) {
     printf("  svc %d, cntpct %d, cntvct %d\n", n_svc, n_cp, n_cv);
     printf("  cntpct target regs: ");
     for (int i = 0; i < 32; i++) if (cp_regs[i]) printf("x%d x%u  ", i, cp_regs[i]);
-    printf("\n\n");
+    printf("\n");
+
+    int bad_all = 0;
 
     /* 判据 0：返回点唯一 */
     int dup = 0;
     for (size_t i = 1; i < h.n; i++) if (h.ents[i].ret == h.ents[i-1].ret) dup++;
-    printf("  duplicate return points: %d %s\n\n", dup, dup ? "<-- PROBLEM" : "(unique)");
+    printf("  [0] duplicate return points: %d %s\n", dup, dup ? "<-- PROBLEM" : "(unique)");
+    bad_all += dup;
 
-    /* 判据 1：svc 门分发 —— 核对「调到了」且「x0 的语义正确」
-     *   若该调用的 x0 是结果码：分发器成功时应置 0
-     *   若是返回值类（GetSystemTick / GetProcessId / ...）：x0 由实现决定，分发器不置 0
-     * 这里只验证分发器行为：对结果码类，实现不写 x0 → 分发后应为 0。 */
-    printf("=== check 1: svc gate dispatch ===\n");
+    /* 判据 1：svc 门分发（最多看前 8 条） */
     int ok1 = 0, bad1 = 0;
     for (size_t i = 0; i < h.n && ok1 + bad1 < 8; i++) {
         if (h.ents[i].kind != DM_GATE_SVC) continue;
@@ -70,20 +73,14 @@ int main(int argc, char **argv) {
         uint32_t n = h.ents[i].arg;
         g_svc_seen[n < 256 ? n : 0] = 0;
         dm_gate_dispatch(&h, h.ents[i].ret, r);
-        int dispatched = (g_svc_seen[n < 256 ? n : 0] == 1);
-        if (dispatched) {
-            ok1++;
-            if (ok1 <= 5) printf("  ret %#llx svc#%u (%s) -> dispatched, x0=%#llx\n",
-                                 (unsigned long long)h.ents[i].ret, n, "impl",
-                                 (unsigned long long)r[0]);
-        } else bad1++;
+        if (g_svc_seen[n < 256 ? n : 0] == 1) ok1++;
+        else bad1++;
     }
-    printf("  pass %d, mismatch %d\n\n", ok1, bad1);
+    printf("  [1] svc dispatch: pass %d, mismatch %d\n", ok1, bad1);
+    bad_all += bad1;
 
-    /* 判据 2：cntpct/cntvct 门 —— 结果必须写进 arg 指定的寄存器 */
-    printf("=== check 2: timer gate writes the right register ===\n");
+    /* 判据 2：cntpct/cntvct 门 —— 结果必须写进 arg 指定的寄存器，别的不许动 */
     int ok2 = 0, bad2 = 0;
-    g_fake_ticks = 0x1234567890ABCDEFull;
     for (size_t i = 0; i < h.n; i++) {
         if (h.ents[i].kind != DM_GATE_CNTPCT && h.ents[i].kind != DM_GATE_CNTVCT) continue;
         uint64_t r[DM_REG_COUNT];
@@ -91,78 +88,122 @@ int main(int argc, char **argv) {
         uint32_t tgt = h.ents[i].arg;
         dm_gate_dispatch(&h, h.ents[i].ret, r);
         if (tgt >= DM_REG_COUNT) { bad2++; continue; }
-        if (r[tgt] != g_fake_ticks) { bad2++; continue; }
+        if (r[tgt] == (uint64_t)(0xDEAD0000 + tgt) || r[tgt] == 0) { bad2++; continue; }
         int other = 0;
         for (int k = 0; k < DM_REG_COUNT; k++)
             if (k != (int)tgt && r[k] != (uint64_t)(0xDEAD0000 + k)) other++;
         if (other) { bad2++; continue; }
         ok2++;
     }
-    printf("  pass %d, mismatch %d\n", ok2, bad2);
-    if (ok2) printf("  (timestamp %#llx written into each gate's arg register)\n\n",
-                    (unsigned long long)g_fake_ticks);
+    printf("  [2] timer gate writes arg register: pass %d, mismatch %d\n", ok2, bad2);
+    bad_all += bad2;
 
     /* 判据 3：未登记的返回点不改任何寄存器 */
-    printf("=== check 3: unregistered gate ===\n");
-    uint64_t r[DM_REG_COUNT];
-    for (int k = 0; k < DM_REG_COUNT; k++) r[k] = 0xAAAA0000 + k;
-    dm_gate_dispatch(&h, 0xFFFFFFFFFFFFull, r);
+    uint64_t r3[DM_REG_COUNT];
+    for (int k = 0; k < DM_REG_COUNT; k++) r3[k] = 0xAAAA0000 + k;
+    dm_gate_dispatch(&h, 0xFFFFFFFFFFFFull, r3);
     int changed = 0;
-    for (int k = 0; k < DM_REG_COUNT; k++) if (r[k] != (uint64_t)(0xAAAA0000 + k)) changed++;
-    printf("  registers changed: %d %s\n", changed, changed ? "<-- PROBLEM" : "(untouched, correct)");
-    printf("  unknown count: %llu\n\n", (unsigned long long)h.n_unknown);
+    for (int k = 0; k < DM_REG_COUNT; k++) if (r3[k] != (uint64_t)(0xAAAA0000 + k)) changed++;
+    printf("  [3] unregistered gate: registers changed %d %s\n", changed,
+           changed ? "<-- PROBLEM" : "(untouched, correct)");
+    bad_all += changed;
 
-    /* 判据 4：x0 的语义 —— 用**内建实现**验证
-     *   GetSystemTick(0x1e)：x0 是返回值本身，应为 tick
-     *   CloseHandle(0x16)：x0 是结果码，应为 0
-     *   未实现的调用：x0 应为非 0（让客体知道失败，不把垃圾当句柄） */
-    printf("=== check 4: x0 semantics ===\n");
-    {
-        dm_host h2;
-        memset(&h2, 0, sizeof h2);
-        h2.ents = h.ents; h2.n = h.n; h2.svc = NULL;   /* svc=NULL -> 走内建实现 */
-        g_fake_ticks = 0xABCDEF123456789ull;
+    /* 判据 4~6 用内建实现（svc=NULL）—— 并顺便找好各自要用的门 */
+    dm_host h2;
+    memset(&h2, 0, sizeof h2);
+    h2.ents = h.ents; h2.n = h.n;
 
-        const dm_gate_ent *e_tick = NULL, *e_close = NULL, *e_unimpl = NULL;
-        for (size_t i = 0; i < h.n; i++) {
-            if (h.ents[i].kind != DM_GATE_SVC) continue;
-            if (h.ents[i].arg == 0x1e) e_tick = &h.ents[i];
-            if (h.ents[i].arg == 0x16) e_close = &h.ents[i];
-            if (h.ents[i].arg == 0x53) e_unimpl = &h.ents[i];   /* ReadWriteRegister：未实现 */
+    const dm_gate_ent *e_tick = NULL, *e_close = NULL, *e_un = NULL, *e21 = NULL, *e22 = NULL;
+    for (size_t i = 0; i < h.n; i++) {
+        if (h.ents[i].kind != DM_GATE_SVC) continue;
+        switch (h.ents[i].arg) {
+        case 0x1e: e_tick  = &h.ents[i]; break;
+        case 0x16: e_close = &h.ents[i]; break;
+        case 0x21: e21     = &h.ents[i]; break;
+        case 0x22: e22     = &h.ents[i]; break;
+        case 0x02: case 0x07: e_un = &h.ents[i]; break;   /* 已知未实现：SetMemoryPermission / ExitProcess */
+        default: break;
         }
-        int ok4 = 0, bad4 = 0;
-        uint64_t r[DM_REG_COUNT];
-        if (e_tick) {
-            for (int k = 0; k < DM_REG_COUNT; k++) r[k] = 0;
-            dm_gate_dispatch(&h2, e_tick->ret, r);
-            if (r[0] == g_fake_ticks) { ok4++; printf("  GetSystemTick -> x0=%#llx (== tick) OK\n",
-                                                      (unsigned long long)r[0]); }
-            else { bad4++; printf("  GetSystemTick -> x0=%#llx, expected %#llx\n",
-                                  (unsigned long long)r[0], (unsigned long long)g_fake_ticks); }
-        }
-        if (e_close) {
-            for (int k = 0; k < DM_REG_COUNT; k++) r[k] = 0xFFFF;
-            dm_gate_dispatch(&h2, e_close->ret, r);
-            if (r[0] == 0) { ok4++; printf("  CloseHandle -> x0=0 (result code) OK\n"); }
-            else { bad4++; printf("  CloseHandle -> x0=%#llx, expected 0\n", (unsigned long long)r[0]); }
-        }
-        if (e_unimpl) {
-            for (int k = 0; k < DM_REG_COUNT; k++) r[k] = 0;
-            dm_gate_dispatch(&h2, e_unimpl->ret, r);
-            if (r[0] != 0) { ok4++; printf("  unimplemented svc#%u -> x0=%#llx (non-zero) OK\n",
-                                           e_unimpl->arg, (unsigned long long)r[0]); }
-            else { bad4++; printf("  unimplemented svc -> x0=0 (should be non-zero)\n"); }
-        }
-        printf("  pass %d, mismatch %d\n\n", ok4, bad4);
-        bad1 += bad4;   /* 计入总判定 */
     }
+    uint64_t r4[DM_REG_COUNT];
 
-    printf("=== stats ===\n");
-    printf("  n_svc=%llu n_cntpct=%llu n_cntvct=%llu n_unknown=%llu\n",
-           (unsigned long long)h.n_svc, (unsigned long long)h.n_cntpct,
-           (unsigned long long)h.n_cntvct, (unsigned long long)h.n_unknown);
+    /* 判据 4：x0 的语义 */
+    int ok4 = 0, bad4 = 0;
+    if (!e_tick) printf("  [4] (no svc 0x1e in table; skipped)\n");
+    else {
+        uint64_t a = 0, b = 0;
+        for (int k = 0; k < DM_REG_COUNT; k++) r4[k] = 0;
+        dm_gate_dispatch(&h2, e_tick->ret, r4); a = r4[0];
+        for (int k = 0; k < DM_REG_COUNT; k++) r4[k] = 0;
+        dm_gate_dispatch(&h2, e_tick->ret, r4); b = r4[0];
+        if (a && b > a) { ok4++; printf("  [4] GetSystemTick -> x0 %llu then %llu (value, not result code) OK\n",
+                                        (unsigned long long)a, (unsigned long long)b); }
+        else { bad4++; printf("  [4] GetSystemTick -> x0 %llu then %llu (expected increasing non-zero)\n",
+                              (unsigned long long)a, (unsigned long long)b); }
+    }
+    if (e_close) {
+        for (int k = 0; k < DM_REG_COUNT; k++) r4[k] = 0xFFFF;
+        dm_gate_dispatch(&h2, e_close->ret, r4);
+        if (r4[0] == 0) { ok4++; printf("  [4] CloseHandle -> x0=0 (result code) OK\n"); }
+        else { bad4++; printf("  [4] CloseHandle -> x0=%#llx, expected 0\n", (unsigned long long)r4[0]); }
+    }
+    bad_all += bad4;
 
-    int allbad = dup + bad1 + bad2 + changed;
-    printf("\n=== result: %s ===\n", allbad ? "MISMATCHES" : "ALL PASS");
-    return allbad ? 1 : 0;
+    /* 判据 5：未实现的调用 -> 假成功（x0=0、其它寄存器原样） */
+    int bad5 = 0;
+    if (!e_un) printf("  [5] (no known-unimplemented svc in table; skipped)\n");
+    else {
+        for (int k = 0; k < DM_REG_COUNT; k++) r4[k] = 0xDEAD0000 + k;
+        dm_gate_dispatch(&h2, e_un->ret, r4);
+        int chg = 0;
+        for (int k = 0; k < DM_REG_COUNT; k++)
+            if (k != DM_REG_X0 && r4[k] != (uint64_t)(0xDEAD0000 + k)) chg++;
+        if (r4[DM_REG_X0] == 0 && chg == 0) {
+            printf("  [5] svc#%u (unimplemented) -> x0=0, other regs untouched OK\n", e_un->arg);
+        } else {
+            bad5++;
+            printf("  [5] svc#%u -> x0=%#llx, other-changed=%d (expected x0=0 and others untouched)\n",
+                   e_un->arg, (unsigned long long)r4[0], chg);
+        }
+    }
+    bad_all += bad5;
+
+    /* 判据 6：句柄不是指针（第 59 轮 .ips 复现）—— deref 会直接崩掉本测试进程 */
+    int bad6 = 0;
+    if (!e21 && !e22) printf("  [6] (no svc 0x21/0x22 in table; skipped)\n");
+    if (e21) {
+        for (int k = 0; k < DM_REG_COUNT; k++) r4[k] = 0x11110000 + k;
+        r4[DM_REG_X0] = 0xC0000002ull;      /* 会话句柄值 */
+        dm_gate_dispatch(&h2, e21->ret, r4);   /* 若把它当缓冲读，这里就崩了 */
+        if (r4[DM_REG_X0] == 0) { printf("  [6] svc21 handle-as-x0: no deref, x0=0 OK\n"); }
+        else { bad6++; printf("  [6] svc21 -> x0=%#llx (expected 0)\n", (unsigned long long)r4[0]); }
+    }
+    if (e22) {
+        for (int k = 0; k < DM_REG_COUNT; k++) r4[k] = 0x22220000 + k;
+        r4[DM_REG_X0] = 0xC0000002ull;      /* 再喂一次「句柄当缓冲」的形态 */
+        r4[DM_REG_X2] = 0xC0000001ull;
+        dm_gate_dispatch(&h2, e22->ret, r4);
+        if (r4[DM_REG_X0] == 0) { printf("  [6] svc22 bogus buf: no deref, x0=0 OK\n"); }
+        else { bad6++; printf("  [6] svc22 -> x0=%#llx (expected 0)\n", (unsigned long long)r4[0]); }
+    }
+    bad_all += bad6;
+
+    printf("  file total mismatches: %d\n\n", bad_all);
+    return bad_all;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        printf("usage: host_selftest <gates.tsv> [more gates.tsv ...]\n");
+        return 2;
+    }
+    int total = 0, nok = 0, nbad = 0;
+    for (int i = 1; i < argc; i++) {
+        int bad = run_file(argv[i]);
+        if (bad) { nbad++; total += bad; }
+        else nok++;
+    }
+    printf("=== files: %d ok, %d with mismatches ===\n", nok, nbad);
+    printf("=== result: %s ===\n", total ? "MISMATCHES" : "ALL PASS");
+    return total ? 1 : 0;
 }
