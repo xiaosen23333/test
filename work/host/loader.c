@@ -270,7 +270,12 @@ int dm_loader_exec_selftest(void) {
 }
 
 #if defined(__APPLE__)
+  /* mach_vm_region 在 <mach/mach_vm.h> 里，不在 <mach/mach.h>；
+     VM_REGION_BASIC_INFO_64 / vm_region_basic_info_data_64_t 在 <mach/vm_region.h>。
+     （CI #21 报的就是「call to undeclared function 'mach_vm_region'」。） */
   #include <mach/mach.h>
+  #include <mach/mach_vm.h>
+  #include <mach/vm_region.h>
   /* 把 VM_PROT_* 折叠成 1=R / 2=W / 4=X */
   static int darwin_vm_prot(uintptr_t addr, unsigned *prot_out) {
       mach_vm_address_t a = (mach_vm_address_t)addr;
