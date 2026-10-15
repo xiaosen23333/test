@@ -551,6 +551,19 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
      * ConnectToHipcService，表没填就是裸偏移 → SIGSEGV（第 61 轮 .ips 实证）。
      * 所以不建会话、直接返回；后续各服务接口在用到时再逐个接管。 */
     if (name) {
+        /* !! nndiagStartup 必须**最先**判，且不受前缀表约束 !!
+         * 为什么（第 69 轮 .ips 实证）：它不是 _ZN2nn 修饰名，前缀表覆盖不到它。
+         * 第 68 轮把 57 条名字清单换成 20 个前缀时把它漏了 —— 于是本分支成了死代码、
+         * SDK 自己那份 nndiagStartup 被执行：nninitInitializeSdkModule
+         *   → nndiagStartup → nn::lm::CreateLogServiceByHipc
+         *   → ConnectToHipcService(&h, "lm")（名字来自服务描述表 0xb7ddd0，
+         *     该表在 .rela.dyn 里没有 RELATIVE 条目，值是裸偏移 0x8ffad7）
+         *   → GetPortProcessor("lm") 查不到 → strlen(0x8ffad7) → SIGSEGV。
+         * D2R 的 HLE_FORCE 清单第 178 行也有 nndiagStartup —— 它就是无条件接管的。 */
+        if (!strcmp(name, "nndiagStartup")) {
+            extern void dm_nn_nndiagStartup(void);
+            return (void *)dm_nn_nndiagStartup;
+        }
         static const char *force_prefixes[] = {   /* 20 个服务层 nn:: 命名空间 */
             "_ZN2nn7account",
             "_ZN2nn7friends",
@@ -579,10 +592,6 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
                 if (!strncmp(name, force_prefixes[k], strlen(force_prefixes[k]))) { force = 1; break; }
         }
         if (force) {
-            if (!strcmp(name, "nndiagStartup")) {
-                extern void dm_nn_nndiagStartup(void);
-                return (void *)dm_nn_nndiagStartup;
-            }
             void *h = dm_nn_force_lookup(name);
             if (h) return h;
         }
