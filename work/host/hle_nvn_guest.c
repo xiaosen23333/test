@@ -167,6 +167,18 @@ static void guest_main(void) {
         dm_diag_stage(3, "没有 _init_libc1 符号（跳过）");
     }
 
+    /* !! 第 61 轮：全局构造提前到第 4 步之前 !!
+     * 原来放在第 7 步（nninitStartup 之后），但第 4 步 nninitInitializeSdkModule
+     * 就要用 nn::sf::hipc 的服务描述表 —— 那张表靠构造函数填名字指针，
+     * 没填就是裸偏移：strlen(0x8ffad7) SIGSEGV（.ips 实证）。
+     * 真机上 rtld 在装载完模块就跑它们，本就早于一切 SDK 初始化。 */
+    {
+        extern void dm_boot_run_module_inits(void);   /* hle_nvn_boot.c */
+        dm_diag_stage(3, "跑各模块全局构造（DT_INIT + .init_array）");
+        dm_boot_run_module_inits();
+        dm_diag_stage(3, "全局构造已完成");
+    }
+
     if (P->sdk_module) {
         dm_diag_stage(4, "调用 nninitInitializeSdkModule");
         ((fn0)P->sdk_module)();
@@ -191,14 +203,14 @@ static void guest_main(void) {
         dm_diag_stage(6, "没有 _init_libc2 符号（跳过）");
     }
 
-    /* 各模块的 DT_INIT（全局构造函数）。真机上这一步由 rtld 的回调 B 做；
-       宿主替它做，时机放在 nninitStartup 之后（与 D2R 的 run_module_inits 一致）。 */
+    /* 各模块 DT_INIT 已在第 3 步后随 .init_array 一起跑完（第 61 轮重排）。
+     * 这里保留计划里独立的 _init 兜底：ProtectRelro 的宿主实现幂等，重复调无害。 */
     if (P->init_array) {
-        dm_diag_stage(7, "调用各模块 DT_INIT（全局构造函数）");
+        dm_diag_stage(7, "补跑计划里的 _init（兜底）");
         ((fn0)P->init_array)();
-        dm_diag_stage(7, "DT_INIT 已返回");
+        dm_diag_stage(7, "兜底 _init 已返回");
     } else {
-        dm_diag_stage(7, "没有 _init 符号（跳过全局构造）");
+        dm_diag_stage(7, "没有 _init 符号（跳过）");
     }
 
     if (P->nn_main) {

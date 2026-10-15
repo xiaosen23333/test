@@ -206,6 +206,11 @@ int dm_host_boot(const char *romfs_dir, const char *save_dir) {
     }
     g_boot_info.n_relocs = tot.n_relative + tot.n_abs + tot.n_jump + tot.n_tlsdesc;
 
+    /* 第 61 轮：.init_array 条目补基址（本游戏 SDK 无 RELATIVE 条目，真机由 rtld
+     * 按基址相对处理）。必须在页保护之前 —— 数组在数据段，要可写。 */
+    for (unsigned i = 0; i < g_ctx.nmods; i++)
+        dm_loader_fix_init_arrays(&g_ctx.mods[i]);
+
     /* !! 重定位做完之后、进客体之前：把各模块的**代码页设成可执行** !!
      * 没有这一步，客体第一条指令就会炸（内核不执行不可执行的页），
      * 而且症状是「宿主标记都正常、之后永远没下文」—— 第 48 轮才定位到。 */
@@ -375,6 +380,30 @@ int dm_boot_query_region(uint64_t addr, uint64_t *base, uint64_t *size,
         }
     }
     return 0;
+}
+
+/* 第 61 轮：跑各模块的 DT_INIT + .init_array（C++ 全局构造）。
+ *
+ * 为什么必须有它：真机上 rtld 在装载完模块就跑这些（早于一切 SDK 初始化），
+ * 而我们原来的顺序把「全局构造」放在第 7 步 —— 晚于第 4 步 nninitInitializeSdkModule，
+ * 后者一用 nn::sf::hipc 的服务描述表（靠构造填的名字指针）就崩
+ * （strlen(裸偏移 0x8ffad7)，.ips 202111）。调用于 _init_libc1 之后（libc 锁已就绪）、
+ * nninitInitializeSdkModule 之前。 */
+void dm_boot_run_module_inits(void) {
+    for (unsigned i = 0; i < g_ctx.nmods; i++) {
+        dm_module *m = &g_ctx.mods[i];
+        unsigned done = 0;
+        if (m->dt_init) {
+            void (*fn)(void) = (void (*)(void))m->dt_init;
+            fn();
+            done++;
+        }
+        for (size_t k = 0; k < m->init_array_n; k++) {
+            void (*fn)(void) = (void (*)(void))m->init_array[k];
+            if (fn) { fn(); done++; }
+        }
+        if (done) dm_diag_mark("全局构造：模块 %u（%s）跑了 %u 个", i, m->name, done);
+    }
 }
 
 /* ---------------- 逐帧 ---------------- */

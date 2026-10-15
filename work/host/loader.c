@@ -241,6 +241,12 @@ static int loader_finish(dm_module *m, unsigned key_values[DM_KEY_COUNT]) {
         case DM_DT_RELASZ: m->relasz = d->d_un.d_val; break;
         case DM_DT_JMPREL: m->jmprel = (const dm_rela *)(m->base + d->d_un.d_ptr); break;
         case DM_DT_PLTRELSZ: m->pltsz = d->d_un.d_val; break;
+        /* 第 61 轮：模块的 init 函数与 C++ 全局构造数组。
+         * 真机上 rtld 在装载时就跑它们（早于一切 SDK 初始化）—— 本游戏的
+         * nn::sf::hipc 服务描述表就是靠构造函数填的名字指针。 */
+        case DM_DT_INIT:          m->dt_init = (void *)(m->base + d->d_un.d_ptr); break;
+        case DM_DT_INIT_ARRAY:    m->init_array = (void **)(m->base + d->d_un.d_ptr); break;
+        case DM_DT_INIT_ARRAYSZ:  m->init_array_n = d->d_un.d_val / sizeof(void *); break;
         }
     if (!m->strtab || !m->symtab) return -8;
     m->nsym = (unsigned)(((const uint8_t *)m->strtab - (const uint8_t *)m->symtab) / DM_SYM_SIZE);
@@ -510,6 +516,23 @@ int dm_loader_finalize(dm_module *m) {
 
 #undef DM_PROT_RANGE
     return fails;
+}
+
+/* 第 61 轮：把 .init_array 条目加上模块基址。
+ *
+ * 为什么必须有它（.ips 实证）：本游戏的 SDK 模块里，.init_array 的 83 个条目、
+ * 以及 nn::sf::hipc 的服务描述表（"lm" 等名字指针）在 .rela.dyn 里**都没有**
+ * R_AARCH64_RELATIVE 条目 —— 真机上由 rtld 按「init/fini 数组与部分表 = 基址相对」
+ * 的约定处理（也由构造函数填表）。我们既不加基址、又不跑构造，SDK 第 4 步
+ * 一用就是裸偏移：strlen(0x8ffad7) → SIGSEGV。
+ * 必须在页保护（dm_loader_finalize）**之前**调 —— 数组在数据段，要可写。 */
+void dm_loader_fix_init_arrays(dm_module *m) {
+    if (!m->init_array || !m->init_array_n) return;
+    for (size_t i = 0; i < m->init_array_n; i++) {
+        uint64_t v = (uint64_t)m->init_array[i];
+        /* 只加没有基址的：条目是裸偏移（< 模块大小）。幂等：已加过的不再加。 */
+        if (v && v < m->size) m->init_array[i] = (void *)(v + (uint64_t)m->base);
+    }
 }
 
 const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *name) {

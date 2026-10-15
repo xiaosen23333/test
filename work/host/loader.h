@@ -31,6 +31,7 @@ enum { DM_PROT_R = 1, DM_PROT_W = 2, DM_PROT_X = 4 };
 enum {
     DM_DT_PLTRELSZ = 0x02, DM_DT_STRTAB = 0x05, DM_DT_SYMTAB = 0x06,
     DM_DT_RELA = 0x07, DM_DT_RELASZ = 0x08, DM_DT_JMPREL = 0x17,
+    DM_DT_INIT = 0x0c, DM_DT_INIT_ARRAY = 0x19, DM_DT_INIT_ARRAYSZ = 0x1b,
 };
 
 /* 重定位类型 */
@@ -63,6 +64,9 @@ typedef struct {
     unsigned       nsym;
     const dm_rela *rela, *jmprel;
     uint64_t       relasz, pltsz;
+    void          *dt_init;        /* DT_INIT（模块自身的 _init） */
+    void         **init_array;     /* DT_INIT_ARRAY：C++ 全局构造函数数组（第 61 轮加） */
+    size_t         init_array_n;   /* 条目数（DT_INIT_ARRAYSZ / 8） */
     int            embedded;      /* 1 = 从已签名的 Guest.framework vm_remap 而来（iOS 真机） */
 } dm_module;
 
@@ -117,6 +121,10 @@ uint64_t dm_tlsdesc_resolver(uint64_t *desc);
  *   **改写器补丁区** [PATCH_OFF, +LEN) → R+X   ← 客体的改写代码全在这儿
  * 返回 0 表示全部成功；>0 = 失败的区段数（失败原因由 loader.c 记进诊断日志）。 */
 int dm_loader_finalize(dm_module *m);
+/* 第 61 轮：把 .init_array 条目加上模块基址（必须在 finalize 之前、relocate 之后调）。
+ * 背景：本游戏 SDK 的 init_array 与 nn::sf 服务描述表没有 RELATIVE 重定位条目，
+ * 真机由 rtld 按「基址相对」约定处理；我们不补的话 SDK 一用就是裸偏移。 */
+void dm_loader_fix_init_arrays(dm_module *m);
 
 /* iOS 真机专用：从**会被代码签名的** Guest.framework/Guest 里取段，
  * vm_remap 回原始相对布局（代码页共享已签名页，可写段写时复制）。
