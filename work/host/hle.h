@@ -17,8 +17,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* regs[0..30] = x0..x30；regs[31] 保留（不用）。 */
-#define DM_REG_COUNT 31
+/* regs[0..30] = x0..x30。
+ * 第 79 轮起 regs[31] = **进门那一刻的客体 SP**（只在 aarch64 上由 entry.S 填；
+ * Windows 自测里是未初始化的，读它之前必须先用 dm_diag_read_u64 之类做区间校验）。
+ * 为什么需要它：客体的 x29/x30 在门 thunk 里被改写了（thunk 拿它们算门地址），
+ * 所以 regs[29]/regs[30] **不是**客体的帧指针和返回地址 —— 光看它们查不到
+ * 「谁调的 Abort」。有了 SP 就能取回 thunk 保存的真 x29/x30，再回溯调用链。 */
+#define DM_REG_COUNT 32
 #define DM_REG_X0    0
 #define DM_REG_X1    1
 #define DM_REG_X2    2
@@ -28,6 +33,7 @@
 #define DM_REG_X8    8
 #define DM_REG_X29   29
 #define DM_REG_X30   30
+#define DM_REG_SP    31
 
 /* 门的类别：与改写器 gates.tsv 的第 2 列一致 */
 typedef enum {
@@ -73,5 +79,10 @@ int dm_boot_query_region(uint64_t addr, uint64_t *base, uint64_t *size,
 
 /* 门分发入口 —— _dm_gate 调用它（x0=ret, x1=regs）。 */
 void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs);
+
+/* 第 79 轮：注册「客体中止」逃逸钩子（平台侧提供；hle.c 在致命 svcBreak 上调它）。
+ * 不注册 = 维持旧行为（记完日志继续跑）—— Windows 自测就是这种情况。
+ * 为什么做成钩子而不是直接调平台函数：hle.c 也在 Windows 上编，那里没有那套实现。 */
+void dm_hle_set_abort_hook(void (*f)(void));
 
 #endif /* DM_HOST_HLE_H */

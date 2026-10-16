@@ -82,6 +82,9 @@ int  dm_diag_addr(unsigned long long addr, char *out, int n);
 /* 第 75 轮：addr 落在某模块里 → 返回到模块末尾的剩余字节数（读内存的长度上限）；
  * 不在任何模块里 → 0。配合 Break 的内存倒出用。 */
 unsigned long long dm_diag_addr_left(unsigned long long addr);
+/* 第 79 轮：安全读 8 字节（只在已登记区间里读；读不动回 0）。
+ * 给 Break 的 x29 帧链回溯用 —— 帧指针是客体给的，绝不能裸 deref。 */
+int  dm_diag_read_u64(unsigned long long addr, unsigned long long *out);
 
 /* 崩了：把信号号 / 故障地址 / PC / LR / SP / x0-x3 写进日志。
  * 本函数只做「拼字符串 + write()」，别的什么都不做（信号安全）。

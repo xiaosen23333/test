@@ -90,6 +90,10 @@ typedef struct {
     unsigned long long key_ofs[DM_KEY_COUNT];
     unsigned long long want[DM_KEY_COUNT];
     unsigned          run_bad;              /* 运行期发现被改写的次数（限频日志） */
+    /* 第 79 轮：本线程的「客体中止」逃逸点（svc 0x26 致命 → longjmp 到这里）。
+     * 每线程一份 —— 客体线程中止时只该退出那一个线程，不能把主线程也跳走。 */
+    jmp_buf           abort_jmp;
+    int               abort_jmp_ready;
 } dm_thread_tls;
 
 /* 本线程的块存哪儿：另用一个 pthread 键存指针（与那 4 个键不冲突） */
@@ -112,6 +116,35 @@ static dm_thread_tls *tls_block_this_thread(void) {
         pthread_setspecific(g_block_key, b);
     }
     return b;
+}
+
+/* ---------------- 第 79 轮：客体中止逃逸（longjmp）-------------------------
+ *
+ * !! 为什么必须有这一段（.ips 实证，DmGame-2026-10-17-011234）!!
+ *   nnSdk 的 Abort 长这样（sdk+0x9db00，PC 处的字节流逐条对上了）：
+ *       stp x29,x30,[sp,#-16]! / mov x29,sp / mov x1,x0
+ *       mov w0,wzr            / mov w2,#4 / bl svcBreak / nop / nop / **b .**
+ *   也就是「喊一声 svcBreak，然后跳自己」。宿主此前让 svc 0x26 正常返回，
+ *   客体就永远空转在那条 `b .` 上：主线程回不了 UIKit，100% CPU 跑满 80 秒，
+ *   10 秒后被 iOS 看门狗以 0x8BADF00D 杀掉 —— 用户看到的就是「闪退」。
+ *
+ * 所以致命 Break 必须**跳出客体**。缓冲挂在每线程的 tls 块上：
+ * 客体线程中止只退那一个线程，主线程中止回到 UIKit 继续显示日志。 */
+jmp_buf *dm_plat_abort_jmp(void) {
+    dm_thread_tls *b = tls_block_this_thread();
+    if (!b) return NULL;
+    b->abort_jmp_ready = 1;      /* 取走缓冲即视为本线程已布防 */
+    return &b->abort_jmp;
+}
+
+void dm_plat_guest_abort(void) {
+    dm_thread_tls *b = tls_block_this_thread();
+    if (b && b->abort_jmp_ready) {
+        b->abort_jmp_ready = 0;  /* 只跳一次：万一跳完又有人调，别再回到旧栈帧 */
+        longjmp(b->abort_jmp, 1);
+    }
+    /* 没布防（不该发生）：至少别让这个线程空转烧 CPU */
+    pthread_exit(NULL);
 }
 
 /* ---- 主线程登记（第 54 轮加）---------------------------------------------
@@ -192,6 +225,10 @@ void dm_plat_tls_install(void) {
              ktlr = dm_thread_key(DM_KEY_KTLR), kgate = dm_thread_key(DM_KEY_KGATE);
     dm_thread_tls *b = tls_block_this_thread();
     if (!b) { fprintf(stderr, "[dm] TLS 块分配失败\n"); return; }
+
+    /* 第 79 轮：把「客体中止」的逃逸函数交给 HLE（致命 svcBreak 时它会被调用）。
+     * 装槽是主线程和每个客体线程都会走的路，挂在这里最省事、也不会漏。 */
+    dm_hle_set_abort_hook(dm_plat_guest_abort);
 
     void *tp_tls = b->tls + DM_TP_BIAS;
     void *tp_tlr = b->tlr + DM_TP_BIAS;
@@ -376,9 +413,20 @@ extern void dm_thread_returned(void);                                /* 本文�
 static void *dm_thr_trampoline(void *p) {
     dm_thr *t = p;
     dm_plat_tls_install();                     /* 本线程的 TLS/TLR/门槽（+TLR+0x1F0/0x1F8） */
-    while (!__atomic_load_n(&t->started, __ATOMIC_ACQUIRE)) sched_yield();
-    dm_thread_enter((void *)t->entry, (void *)t->arg, (void *)t->sp);
-    dm_thread_returned();                      /* 客体入口不许返回 */
+
+    /* 第 79 轮：客体线程也要布防「中止逃逸」。
+     * 不布的后果（实测就是这个）：线程里 Abort → 跳进 `b .` → 100% CPU 空转，
+     * 而且它会一直占着一个核，直到看门狗把整个进程杀掉。
+     * 布了以后：线程里 Abort → longjmp 回到这里 → 线程干净退出。
+     * 注意 setjmp 必须写在**本函数**这一帧（它在客体跑的整段时间里都活着）。 */
+    jmp_buf *jb = dm_plat_abort_jmp();
+    if (jb && setjmp(*jb) == 0) {
+        while (!__atomic_load_n(&t->started, __ATOMIC_ACQUIRE)) sched_yield();
+        dm_thread_enter((void *)t->entry, (void *)t->arg, (void *)t->sp);
+        dm_thread_returned();                  /* 客体入口不许返回 */
+    } else {
+        dm_diag_mark("[线程] 客体线程中止（致命 svcBreak）→ 该线程干净退出");
+    }
     return NULL;
 }
 

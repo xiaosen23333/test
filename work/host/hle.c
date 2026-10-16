@@ -148,6 +148,54 @@ static int x0_is_result_code(uint32_t n) {
     }
 }
 
+/* ---------------- 第 79 轮：「客体中止」逃逸钩子 -----------------------------
+ *
+ * !! 这一轮真正的死因（.ips 实证，DmGame-2026-10-17-011234）!!
+ *   exception = SIGKILL / 0x8BADF00D（FRONTBOARD 看门狗），**不是**内存错误：
+ *     "scene-update watchdog transgression ... exhausted real time allowance of 10.00s"
+ *     "Elapsed total CPU time: 80.670s, 100% CPU"
+ *   而崩溃处 PC 的字节流解码出来是：
+ *     stp x29,x30,[sp,#-16]! / mov x29,sp / mov x1,x0 / mov w0,wzr / mov w2,#4
+ *     bl svcBreak / nop / nop / **b .**          ← 跳自己，死循环
+ *   也就是 nnSdk 的 `Abort(Result*)`（sdk+0x9db00）：**svcBreak 之后是一条自跳**。
+ *
+ *   我们此前对 svc 0x26 是「只记日志、return 0 继续跑」—— 于是客体回到那条
+ *   `b .` 上空转，主线程再也回不到 UIKit，10 秒后被系统杀掉。用户看到的就是
+ *   「闪退」，而日志里最后一行永远是那句 Break，**凶手永远看不到**。
+ *
+ * 修法：致命 Break（reason 0=Panic / 1=Assert / 2=User）不再 return 0，
+ * 而是**从客体里跳出来**（longjmp 回「进客体」的那一点）。这样：
+ *   ① 主线程回到 UIKit → 不再被看门狗杀 → 屏幕上能看到完整日志尾部
+ *   ② 客体线程跳回 trampoline → 该线程干净退出，不再 100% CPU 空转
+ * 钩子由平台侧注册（aarch64 用 longjmp；Windows 自测不注册 → 行为不变）。 */
+static void (*g_abort_guest)(void) = NULL;
+
+void dm_hle_set_abort_hook(void (*f)(void)) { g_abort_guest = f; }
+
+/* ---------------- CMIF 应答：写一份「成功」的空应答 -------------------------
+ * "SFCI"（0x49434653）是 nn::sf 的**通用请求魔数**，"SFCO"（0x4F434653）是应答。
+ * 布局（Horizon CMIF）：请求/应答头 4 个字（魔数 / 版本 / 命令号或结果 / 补齐），
+ * 之后是载荷。我们不知道本游戏用的是不是这个精确布局，所以采取「两头都占理」：
+ *   头之后的所有字**一律写 0** —— 于是「结果字段」无论是第 2 个还是第 3 个字，
+ *   读出来都是 0（成功）。唯一必须写对的是应答魔数。
+ * 另外把请求原文的前 12 个字倒进日志（前几次才倒）—— 布局的真相在日志里，
+ * 不在我的猜测里。 */
+#define DM_CMIF_SFCI 0x49434653u     /* "SFCI" 请求 */
+#define DM_CMIF_SFCO 0x4F434653u     /* "SFCO" 应答 */
+static void cmif_echo_ok(volatile uint32_t *w, uint64_t sess, const char *via) {
+    static unsigned n_dump;
+    if (n_dump < 8) {
+        n_dump++;
+        char t[160]; int k = 0;
+        for (int i = 0; i < 12 && k < (int)sizeof t - 12; i++)
+            k += snprintf(t + k, (size_t)(sizeof t - (size_t)k), "%08x ", (unsigned)w[i]);
+        dm_diag_mark("[ipc] %s 会话=%llx 请求前12字: %s", via,
+                     (unsigned long long)sess, t);
+    }
+    w[4] = DM_CMIF_SFCO;                     /* 应答魔数 */
+    for (int i = 5; i < 0x60; i++) w[i] = 0; /* 版本/结果/句柄/载荷 全 0 = 成功 */
+}
+
 /* svc 实现：返回 0 = 已处理（regs 已写好内容）；2 = 未实现（dispatch 按「假成功」
    x0=0 处理并记日志）。-1 这个旧语义（未实现→错误码）第 59 轮已弃用。 */
 /* ---------------- alias 区（SDK 的 VammManager 用；照 D2R hle_svc.c）----------------
@@ -177,6 +225,10 @@ static void dm_alias_ensure(void) {
 #endif
     g_alias_cap = g_alias ? (size_t)DM_ALIAS_CAP : 0;
     dm_diag_mark("alias 区 %p +%#zx（SDK 的 VammManager 用）", (void *)g_alias, g_alias_cap);
+    /* 第 79 轮：登记进诊断区间表 —— 客体新线程（nn::os::CreateThread）的栈就落在
+     * 这段里（第 77 轮后由 AllocateSpace 从这儿切）。不登记的话 Break 倒 ptr 时
+     * 一律显示 (?)，读也读不了，等于丢掉一半证据。 */
+    if (g_alias) dm_diag_set_module("alias区", g_alias, (unsigned long long)g_alias_cap);
 }
 
 /* 给 svc 6 QueryMemory 用（hle_nvn_boot.c 的 dm_boot_query_region）：查询落在 alias
@@ -337,21 +389,24 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                              n, (unsigned long long)sess,
                              (unsigned long long)tlr, 0x0000000100000010ULL);
             } else if (w[4] == 0x49434653 /* "SFCI" */) {
-                /* 第 78 轮：fs（fsp-srv）的 SFCI 请求 —— **写完整应答**。
-                 * 上一轮实测（诊断仪器读出的）：只回成功不给应答数据，
-                 * fs 客户端从数据区读 Result 读到垃圾（0x1a80a，模块 212 描述 10）
-                 * → 游戏判失败 → Break 中止（主线程 + 新线程各一次）。
-                 * 控制头沿用 r60 的形状（0x1_00000010 + 探针清零），
-                 * 数据区整体清零 ⇒ 客户端读到的 Result=0（成功）、句柄=0。
-                 * （真应答要 fs 服务实现 —— OpenFile/ReadFile 的句柄与数据，
-                 *   那是下一步；先让协议层走通。） */
+                /* 第 78/79 轮：**CMIF 请求**（"SFCI" 是 nn::sf 的通用请求魔数，
+                 * 不只是 fs —— 所有 nn:: 服务都用同一套头）。
+                 * 第 78 轮只把数据区清零、没写应答魔数；客户端读到的还是「请求的
+                 * 残留」，失败码（0x1a80a）一轮都没变 —— 说明它要么读的不是这里，
+                 * 要么根本没认这个应答。
+                 * 第 79 轮改成**写一份像样的 SFCO 应答**：
+                 *   w[4] = "SFCO"（应答魔数）、w[5..7] 清零、
+                 *   result 位（w[6]）与载荷一律 0 ⇒ 无论客户端按哪种布局读，
+                 *   Result 都是 0（成功）。
+                 * 同时把**请求原文前 12 个字倒进日志** —— 布局到底长什么样，
+                 * 下一轮日志会给答案，不用再猜。 */
+                cmif_echo_ok(w, sess, "svc21");
                 h[0] = 0x0000000100000010ULL;
                 w[2] = 0;
-                for (int i = 3; i < 0x60; i++) w[i] = 0;   /* 应答数据区清零 */
                 static unsigned n_fs;
-                if (n_fs++ < 24)
-                    dm_diag_mark("[ipc] fs(SFCI) 会话=%llx cmd=%u → 空成功应答（result=0）",
-                                 (unsigned long long)sess, w[5]);
+                if (n_fs++ < 12)
+                    dm_diag_mark("[ipc] CMIF(SFCI) 会话=%llx → 已写 SFCO 空成功应答（result=0）",
+                                 (unsigned long long)sess);
                 wrote_response = 1;
             } else if (n == 0x21) {
                 /* 其它形态：只读日志，暂不盲写 —— 等日志告诉我们这是什么服务。 */
@@ -371,14 +426,32 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
         r[DM_REG_X0] = 0;
         return 0; }
     case 0x22: { /* SendSyncRequestWithUserBuffer(buf=x0, size=x1, 句柄=x2) —— 第 59 轮加。
-                     真语义下 buf 确实是用户缓冲；但 0x21 的教训还热着，本轮**先不 deref**：
-                     只记录三个入参，等真机日志确认它确实被调用、且 buf 像真实指针后
-                     再上内容读取（宁可少一个诊断，也不要再崩在「把值当指针」上）。 */
+                     真语义下 buf 确实是用户缓冲；但 0x21 的教训还热着，读之前**必须**
+                     先确认它落在已登记区间里（dm_diag_addr_left）—— 宁可少一个诊断，
+                     也不要再崩在「把值当指针」上。
+                     第 79 轮：确认是 CMIF 请求（"SFCI"）时**也写应答**。
+                     为什么补这条：0x21 那条路已经写了应答，可失败码一轮都没变，
+                     说明客户端很可能走的是这条「带用户缓冲」的路。两条都写，
+                     至少排除「应答根本没写对地方」这个可能。 */
+        uint64_t buf = r[DM_REG_X0], sz = r[DM_REG_X1], sess = r[DM_REG_X2];
         static unsigned n_wub;
-        if (n_wub++ < 16)
-            dm_diag_mark("[ipc] svc22 WithUserBuffer 会话=%llx buf=%llx size=%llx（暂不读内容）",
-                         (unsigned long long)r[DM_REG_X2], (unsigned long long)r[DM_REG_X0],
-                         (unsigned long long)r[DM_REG_X1]);
+        if (buf && !(buf & 7) && dm_diag_addr_left(buf + 0x10) >= 8) {
+            volatile uint32_t *w = (volatile uint32_t *)(uintptr_t)buf;
+            if (w[4] == DM_CMIF_SFCI) {
+                cmif_echo_ok(w, sess, "svc22");
+                if (n_wub++ < 12)
+                    dm_diag_mark("[ipc] svc22 WithUserBuffer 会话=%llx → 已写 SFCO 空成功应答（result=0）",
+                                 (unsigned long long)sess);
+            } else if (n_wub++ < 16) {
+                dm_diag_mark("[ipc] svc22 WithUserBuffer 会话=%llx buf=%llx size=%llx（不是 SFCI，未写应答）",
+                             (unsigned long long)sess, (unsigned long long)buf,
+                             (unsigned long long)sz);
+            }
+        } else if (n_wub++ < 16) {
+            dm_diag_mark("[ipc] svc22 WithUserBuffer 会话=%llx buf=%llx size=%llx（buf 不像指针，不读）",
+                         (unsigned long long)sess, (unsigned long long)buf,
+                         (unsigned long long)sz);
+        }
         r[DM_REG_X0] = 0;
         return 0; }
     case 0x23:   /* SendAsyncRequestWithUserBuffer：先只回成功、不碰内存（出现再说） */
@@ -429,6 +502,68 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                                  v0, (v0 >> 9) & 0x1fffu, v0 & 0x1ffu, v0 >> 22);
                 }
             }
+            /* 第 79 轮：**重建真正的调用链** —— 这一轮最关键的新证据。
+             *
+             * 为什么不能直接看 regs[29]/regs[30]：客体调门走的是改写器生成的
+             * **门 thunk**，它在进 _dm_gate 之前就把 x29/x30 改成了「取门地址」
+             * 用的临时值（实测：调用点一直显示 sdk+0xc79558，那是 thunk 自己的
+             * 指令）。所以这两个寄存器里**没有客体的帧信息**。
+             *
+             * 出路：entry.S 把「进门那一刻的 SP」存进了 regs[31]，而 thunk 的第一条
+             * 指令就是 `stp x29,x30,[sp,#-16]!` —— 于是
+             *     [SP+0] = 真正的 x29（帧指针）
+             *     [SP+8] = 真正的 x30（本帧返回地址 = Abort 的调用者）
+             * 再顺着 [x29]→上一个 fp / [x29+8]→上一层返回地址 往回走，整条链就有了。
+             *
+             * 万一帧链断了（客体某层没维护 x29），再兜一层：**扫栈**找落在模块里的
+             * 8 字节值 —— 各层保存的返回地址就在那儿。
+             * 安全：每一步都用 dm_diag_read_u64（只在已登记区间里读，越界即止）。 */
+            {
+                unsigned long long sp_in = r[DM_REG_SP];
+                unsigned long long fp = 0, lr = 0;
+                int got = 0;
+                if (dm_diag_read_u64(sp_in, &fp) && dm_diag_read_u64(sp_in + 8, &lr)) {
+                    char l[40] = "?";
+                    dm_diag_mark("[Break] 进门 SP=%llx；thunk 保存的真 x30（Abort 的返回地址）=%s",
+                                 sp_in, dm_diag_addr(lr, l, (int)sizeof l) ? l : "?");
+                    for (int i = 0; i < 12 && fp; i++) {
+                        unsigned long long nx = 0, ra = 0;
+                        if (!dm_diag_read_u64(fp, &nx)) break;
+                        if (!dm_diag_read_u64(fp + 8, &ra)) break;
+                        char f[40] = "?", q[40] = "?";
+                        dm_diag_mark("[Break] 帧%d fp=%s 返回=%s", i,
+                                     dm_diag_addr(fp, f, (int)sizeof f) ? f : "?",
+                                     dm_diag_addr(ra, q, (int)sizeof q) ? q : "?");
+                        got++;
+                        if (nx <= fp) break;      /* 不前进就停（防环） */
+                        fp = nx;
+                    }
+                } else {
+                    dm_diag_mark("[Break] 进门 SP=%llx（读不到真 x29/x30，转扫栈）", sp_in);
+                }
+                /* 兜底：扫栈找看起来像返回地址的值（帧链断了时还能看出个大概） */
+                if (got < 2 && sp_in) {
+                    int shown = 0;
+                    for (unsigned long long a = sp_in; a < sp_in + 0x800 && shown < 24; a += 8) {
+                        unsigned long long v = 0;
+                        if (!dm_diag_read_u64(a, &v)) break;
+                        char q[40] = "?";
+                        if (dm_diag_addr(v, q, (int)sizeof q)) {
+                            dm_diag_mark("[Break] 栈+%03llx → %s", a - sp_in, q);
+                            shown++;
+                        }
+                    }
+                }
+            }
+        }
+        /* 第 79 轮：致命 Break 不再「放行」—— 放行的后果是客体跳进 `b .` 死循环，
+         * 主线程被占死，10 秒后 iOS 看门狗把整个 App 杀掉（0x8BADF00D）。
+         * reason：0=Panic 1=Assert 2=User 一律当中止；3 以上都是加载/卸载回调，放行。 */
+        if (r[DM_REG_X0] <= 2) {
+            dm_diag_mark("[Break] 致命（reason=%llu）→ 客体中止，跳出客体回宿主",
+                         (unsigned long long)r[DM_REG_X0]);
+            r[DM_REG_X0] = 0;
+            if (g_abort_guest) g_abort_guest();     /* 不返回（longjmp / pthread_exit） */
         }
         r[DM_REG_X0] = 0;
         return 0; }

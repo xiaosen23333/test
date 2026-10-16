@@ -188,7 +188,7 @@ static void sb_dec(sb_t *b, unsigned long long v) {
 }
 
 /* 模块表：装载时登记，崩溃时用来把 PC 翻成「模块 + 偏移」 */
-#define DM_DIAG_MAX_MODS 8
+#define DM_DIAG_MAX_MODS 12
 typedef struct { char name[24]; unsigned long long base, size; } dm_diag_mod;
 static dm_diag_mod g_mods[DM_DIAG_MAX_MODS];
 static int          g_nmods = 0;
@@ -233,6 +233,17 @@ unsigned long long dm_diag_addr_left(unsigned long long addr) {
             return b + g_mods[i].size - addr;
     }
     return 0;
+}
+
+/* 第 79 轮：安全读 8 字节 —— 只在**已登记区间**里读，读不动就回 0。
+ * 用途：Break 时按 x29 帧链回溯真正的调用者（见 hle.c 的 0x26 分支）。
+ * 为什么不直接 deref：帧指针是客体给的值，指到未映射页就是「诊断自己把
+ * 进程弄崩」，那以后什么也看不到了。宁可少读一帧。 */
+int dm_diag_read_u64(unsigned long long addr, unsigned long long *out) {
+    if (!addr || (addr & 7)) return 0;
+    if (dm_diag_addr_left(addr) < 8) return 0;
+    if (out) *out = *(volatile unsigned long long *)(uintptr_t)addr;
+    return 1;
 }
 
 /* ---- 门调用记录 ---- */

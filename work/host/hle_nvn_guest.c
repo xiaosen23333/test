@@ -270,10 +270,28 @@ void dm_host_enter_guest(void) {
     dm_diag_mark("线程槽已装好（装过 %d 次）", dm_plat_tls_install_count());
 
     dm_diag_mark("切栈进客体（栈 %u KB）", DM_GUEST_STACK_SIZE / 1024);
-    dm_guest_enter((void *)guest_main, NULL, stack_top);
 
-    /* 能回到这里说明 dm_guest_enter 返回了（即客体那一路走完了） */
-    dm_diag_mark("客体那一路已返回宿主");
+    /* 第 79 轮：**用 setjmp 把「进客体」包起来** —— 客体里一旦发生致命 svcBreak
+     * （nnSdk 的 Abort：svcBreak 之后是一条跳自己的 `b .`），宿主会 longjmp 回到
+     * 这里，而不是让客体在那条指令上空转。
+     *
+     * 为什么这一步是刚需（.ips 实证 DmGame-2026-10-17-011234）：
+     *   exception = SIGKILL / FRONTBOARD 0x8BADF00D（看门狗），CPU 100% 跑满 80 秒
+     *   —— 不是内存错误，就是「主线程被客体的死循环占死，10 秒后被系统杀」。
+     *   后果是：日志最后一行永远只有 Break，屏幕也来不及刷新，凶手看不到。
+     * 包了以后：客体中止 → 回到这里 → 主线程回到 UIKit → 屏幕显示完整日志尾部。
+     *
+     * 注意：setjmp 必须写在**本函数**这一帧 —— 它在 dm_guest_enter 期间一直活着，
+     * 所以 longjmp 回来是合法的（把 setjmp 放进一个已经返回的函数里是未定义行为）。 */
+    jmp_buf *jb = dm_plat_abort_jmp();
+    if (jb && setjmp(*jb) == 0) {
+        dm_guest_enter((void *)guest_main, NULL, stack_top);
+        /* 能回到这里说明 dm_guest_enter 返回了（即客体那一路走完了） */
+        dm_diag_mark("客体那一路已返回宿主");
+    } else {
+        dm_diag_mark("**客体中止（致命 svcBreak）** —— 已跳出客体，回到宿主");
+        dm_diag_stage(9, "客体中止（致命 svcBreak），已回到宿主——见日志里 [Break] 帧链");
+    }
 }
 
 #else  /* 非 aarch64：本文件不产出任何代码 */
