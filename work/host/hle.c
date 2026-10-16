@@ -402,6 +402,15 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                 }
                 t[k] = 0;
                 dm_diag_mark("[Break] @%s 前 %d 字节: %s", nm, nread, t);
+                /* size==4 时它多半是个 nn::Result（错误码）：
+                 * bit0-8=描述 bit9-21=模块 bit22-31=摘要 —— 解出来就知道
+                 * 是哪个子系统在报错（模块号对 switchbrew 的表查）。 */
+                if (nread >= 4) {
+                    unsigned v0 = (unsigned)s[0] | ((unsigned)s[1] << 8) |
+                                  ((unsigned)s[2] << 16) | ((unsigned)s[3] << 24);
+                    dm_diag_mark("[Break] u32=%08x → nn::Result 模块=%u 描述=%u 摘要=%u",
+                                 v0, (v0 >> 9) & 0x1fffu, v0 & 0x1ffu, v0 >> 22);
+                }
             }
         }
         r[DM_REG_X0] = 0;

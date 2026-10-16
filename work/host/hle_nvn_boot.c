@@ -486,6 +486,20 @@ void dm_boot_run_module_inits(void) {
         }
         if (done) dm_diag_mark("全局构造：模块 %u（%s）跑了 %u 个", i, m->name, done);
     }
+
+    /* !! 第 76 轮：把**客体栈**登记进诊断表 !!
+     * 为什么：Break 的中止信息指针经常落在客体栈上（g_guest_stack 是宿主数组、
+     * 不在任何模块区间）—— 不登记的话 dm_diag_addr 命中不了，内存倒不出来
+     * （上一轮实测：[Break] ptr=…3ec(?)，就是它）。本轮 .ips 实证：Break 的
+     * ptr 与崩溃线程里的 g_guest_stack+1042844 是同一个偏移 —— 就在栈上。
+     * 登记（只登记栈，堆/别名区有「读到未提交内存」的风险，按需再说）之后，
+     * Break 的 4 字节参数就能读出来 —— 那多半是个 nn::Result（错误码）。 */
+    {
+        extern void dm_guest_stack_range(void **base, size_t *size);   /* hle_nvn_guest.c */
+        void *sb = 0; size_t ssz = 0;
+        dm_guest_stack_range(&sb, &ssz);
+        if (sb) dm_diag_set_module("客体栈", sb, (unsigned long long)ssz);
+    }
 }
 
 /* ---------------- 逐帧 ---------------- */
