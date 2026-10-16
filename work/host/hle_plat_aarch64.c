@@ -22,6 +22,7 @@ extern void  *dm_host_current(void);
 
 #include <stdio.h>
 #include <string.h>
+#include <setjmp.h>      /* 第 79 轮：jmp_buf —— 本文件里的「客体中止逃逸」要用 */
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 

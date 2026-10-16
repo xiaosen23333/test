@@ -66,12 +66,15 @@ void dm_plat_heap_peek(uint64_t *base, uint64_t *cap, uint64_t *cur);
  * iOS 看门狗（0x8BADF00D）杀掉，日志里最后一行只有 Break，凶手看不到。
  *
  * 用法（两边都要做，且 setjmp 必须写在**会一直活着**的那一帧里）：
- *     主线程  dm_host_enter_guest：  jmp_buf *jb = dm_plat_abort_jmp();
- *                                    if (jb && setjmp(*jb) == 0) dm_guest_enter(...);
- *                                    else /* 客体中止，已回到宿主 */ ;
- *     客体线程 dm_thr_trampoline：   同上，else 分支直接 return NULL（线程干净退出）
+ *     主线程  dm_host_enter_guest：
+ *             取缓冲后若 setjmp 返回 0 就进客体；返回非 0 即「客体中止，已回到宿主」
+ *     客体线程 dm_thr_trampoline：
+ *             同上；非 0 分支直接 return NULL，该线程干净退出
  * 拿到缓冲即视为「本线程已布防」；hle.c 在致命 Break 上调 dm_plat_guest_abort()。
- * 缓冲挂在**每线程**的 tls 块上（pthread_getspecific），所以多线程各跳各的。 */
+ * 缓冲挂在**每线程**的 tls 块上（pthread_getspecific），所以多线程各跳各的。
+ *
+ * !! 块注释里绝不能再嵌一对方块注释符 !! —— 里层那个结束符会把本注释提前关掉，
+ * 后面的 #include 与声明会被当成代码，clang 报一串莫名其妙的错（第 79 轮踩过）。 */
 #include <setjmp.h>
 jmp_buf *dm_plat_abort_jmp(void);    /* 本线程的逃逸缓冲（顺带布防） */
 void     dm_plat_guest_abort(void);  /* 从客体里跳出来；没布防就 pthread_exit（不返回） */

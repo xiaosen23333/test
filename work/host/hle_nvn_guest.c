@@ -38,6 +38,7 @@ extern const void *dm_host_boot_plan(void);
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <setjmp.h>      /* 第 79 轮：setjmp —— 把「进客体」包住，客体中止时跳回来 */
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 
