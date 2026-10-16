@@ -241,6 +241,9 @@ static int loader_finish(dm_module *m, unsigned key_values[DM_KEY_COUNT]) {
         case DM_DT_RELASZ: m->relasz = d->d_un.d_val; break;
         case DM_DT_JMPREL: m->jmprel = (const dm_rela *)(m->base + d->d_un.d_ptr); break;
         case DM_DT_PLTRELSZ: m->pltsz = d->d_un.d_val; break;
+        /* 第 73 轮：DT_RELR / DT_RELRSZ（DT_RELRENT 恒为 8，不必存） */
+        case DM_DT_RELR:   m->relr   = (const uint64_t *)(m->base + d->d_un.d_ptr); break;
+        case DM_DT_RELRSZ: m->relrsz = d->d_un.d_val; break;
         /* 第 61 轮：模块的 init 函数与 C++ 全局构造数组。
          * 真机上 rtld 在装载时就跑它们（早于一切 SDK 初始化）—— 本游戏的
          * nn::sf::hipc 服务描述表就是靠构造函数填的名字指针。 */
@@ -569,6 +572,11 @@ int dm_loader_finalize(dm_module *m) {
  * 必须在页保护（dm_loader_finalize）**之前**调 —— 数组在数据段，要可写。 */
 void dm_loader_fix_init_arrays(dm_module *m) {
     if (!m->init_array || !m->init_array_n) return;
+    /* 第 73 轮：模块有 DT_RELR 时，**那张表已经把 init_array 条目补过基址了**
+     * （核对过：sdk 83 / main 452 / NmplDLL 156 全部被覆盖，数量分毫不差）。
+     * 这里再补一次就是**加两遍基址** —— 必须让位。
+     * 保留本函数只为兜底（万一将来遇到没有 DT_RELR 的模块）。 */
+    if (m->relr && m->relrsz) return;
     for (size_t i = 0; i < m->init_array_n; i++) {
         uint64_t v = (uint64_t)m->init_array[i];
         /* 只加没有基址的：条目是裸偏移（< 模块大小）。幂等：已加过的不再加。 */
@@ -662,6 +670,47 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
 
 int dm_loader_relocate(dm_module *m, const dm_module *mods, unsigned nmods,
                        dm_load_stats *st) {
+    /* !! 第 73 轮：先处理 **DT_RELR**（紧凑相对重定位）!!
+     *
+     * 为什么必须有它（这是本工程一连串「裸偏移」崩溃的**统一根因**）：
+     *   NSO 里「模块内部的绝对指针」用的是 RELATIVE 类重定位，Horizon 把它们
+     *   压缩成 DT_RELR 表：一串 64 位项，
+     *     偶数项 = 一个需要重定位的槽位地址；
+     *     奇数项 = 63 位位图（bit i 置位 ⇒ 上一个偶数项之后的第 i 个 8 字节槽）。
+     *   每个槽的语义与 R_*_RELATIVE 相同：**当前值（链接期地址=偏移）+ 模块基址**。
+     *
+     * 漏处理的后果（真机实证，按发现顺序）：
+     *   · init_array 条目停在裸偏移 → 第 61 轮用 dm_loader_fix_init_arrays 手工补
+     *     （本轮核对：sdk 83 项 / main 452 项 / NmplDLL 156 项，**DT_RELR 已全部覆盖**）
+     *   · nn::sf::hipc 服务描述表（"lm" 名字指针）裸偏移 → 第 69 轮接管 nndiagStartup
+     *   · rtld 自己的表裸偏移 → 第 71 轮跳过 rtld
+     *   · 模块信息表裸偏移 → 第 72 轮接管 __nnmusl_init_dso
+     *   · 构造函数里经函数指针/虚表跳转 → 跳到裸偏移 0x5ebbac → 取指令踩不可执行页
+     *     → CODESIGNING / Invalid Page（本轮 .ips）
+     * 补上它之后这些绕行仍然保留（它们各有理由，见各自注释），但**指针本身不再是裸偏移**。 */
+    if (m->relr && m->relrsz) {
+        uint64_t base = (uint64_t)m->base;
+        uint64_t n    = m->relrsz / 8;
+        uint64_t where = 0;                 /* 位图项的基准（上一个偶数项 + 8） */
+        for (uint64_t i = 0; i < n; i++) {
+            uint64_t e = m->relr[i];
+            if ((e & 1) == 0) {
+                uint64_t *slot = (uint64_t *)(base + e);
+                *slot += base;              /* RELATIVE：链接期地址 + 装载基址 */
+                st->n_relr++;
+                where = e + 8;
+            } else {
+                uint64_t bits = e >> 1;
+                for (unsigned j = 0; bits; j++, bits >>= 1)
+                    if (bits & 1) {
+                        uint64_t *slot = (uint64_t *)(base + where + (uint64_t)j * 8);
+                        *slot += base;
+                        st->n_relr++;
+                    }
+                where += 63 * 8;
+            }
+        }
+    }
     const dm_rela *tabs[2] = { m->rela, m->jmprel };
     uint64_t sizes[2] = { m->relasz, m->pltsz };
     for (int t = 0; t < 2; t++) {

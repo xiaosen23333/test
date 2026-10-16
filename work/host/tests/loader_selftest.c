@@ -96,10 +96,30 @@ int main(int argc, char **argv) {
         tot.n_jump += each[i].n_jump; tot.n_unresolved += each[i].n_unresolved;
         tot.n_bad_sym += each[i].n_bad_sym;
         printf("done\n");
-        printf("       RELATIVE %6llu  ABS/GLOB %6llu  JUMP_SLOT %6llu  unresolved %4llu  bad_sym %llu\n",
+        printf("       RELATIVE %6llu  ABS/GLOB %6llu  JUMP_SLOT %6llu  unresolved %4llu  bad_sym %llu  RELR %6llu\n",
                (unsigned long long)each[i].n_relative, (unsigned long long)each[i].n_abs,
                (unsigned long long)each[i].n_jump, (unsigned long long)each[i].n_unresolved,
-               (unsigned long long)each[i].n_bad_sym);
+               (unsigned long long)each[i].n_bad_sym, (unsigned long long)each[i].n_relr);
+        fflush(stdout);
+    }
+    printf("\n  [step 3b] DT_RELR 已应用？init_array 条目必须**带基址**（第 73 轮回归断言）\n");
+    int relr_ok = 1;
+    /* 第 73 轮：漏处理 DT_RELR 会让模块内部所有绝对指针停在裸偏移上 ——
+     * 那是本工程一连串崩溃的统一根因（init_array / 服务描述表 / 模块信息表 /
+     * 构造函数里的函数指针跳转）。这里用「init_array 条目 ≥ 模块基址」来盯住它。 */
+    relr_ok = 1;
+    for (unsigned i = 0; i < ctx.nmods; i++) {
+        dm_module *m = &ctx.mods[i];
+        if (!m->init_array_n) { printf("    %-14s （无 init_array）\n", m->name); continue; }
+        uintptr_t base = (uintptr_t)m->base;
+        int ok = 1;
+        for (size_t k = 0; k < m->init_array_n; k++) {
+            uintptr_t v = (uintptr_t)m->init_array[k];
+            if (v < base || v >= base + m->size) { ok = 0; break; }
+        }
+        relr_ok = relr_ok && ok;
+        printf("    %-14s DT_RELR %6llu 项, init_array %zu 项全部带基址: %s\n",
+               m->name, (unsigned long long)each[i].n_relr, m->init_array_n, ok ? "yes" : "NO");
         fflush(stdout);
     }
     printf("\n  TOTAL relocs %llu  (RELATIVE %llu + ABS/GLOB %llu + JUMP %llu)\n",
@@ -208,7 +228,7 @@ int main(int argc, char **argv) {
     }
 
     printf("\n=== result: %s ===\n",
-           (tot.n_bad_sym == 0 && kp_ok && gt_ok && pp_ok && tot.n_unresolved <= 27) ? "ALL PASS" : "CHECK FAILED");
+           (tot.n_bad_sym == 0 && kp_ok && gt_ok && pp_ok && relr_ok && tot.n_unresolved <= 27) ? "ALL PASS" : "CHECK FAILED");
     /* 注意：模块映像是 os_map()（Windows 上是 VirtualAlloc）分配的，
        必须用 os_unmap 释放 —— 用 free() 会访问违例（这里踩过）。
        自测里其实不必释放（进程马上退出），但显式释放能顺带验证映射成对。 */

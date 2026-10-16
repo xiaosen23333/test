@@ -32,6 +32,10 @@ enum {
     DM_DT_PLTRELSZ = 0x02, DM_DT_STRTAB = 0x05, DM_DT_SYMTAB = 0x06,
     DM_DT_RELA = 0x07, DM_DT_RELASZ = 0x08, DM_DT_JMPREL = 0x17,
     DM_DT_INIT = 0x0c, DM_DT_INIT_ARRAY = 0x19, DM_DT_INIT_ARRAYSZ = 0x1b,
+    /* 第 73 轮：DT_RELR —— Horizon 用的**紧凑相对重定位**表（RELATIVE 的要加基址
+     * 的槽位清单，用「偶数=直接地址 / 奇数=63 位位图」编码）。漏处理它的后果见
+     * dm_loader_relocate 里的说明：模块内部所有绝对指针都停在裸偏移上。 */
+    DM_DT_RELRSZ = 0x23, DM_DT_RELR = 0x24, DM_DT_RELRENT = 0x25,
 };
 
 /* 重定位类型 */
@@ -64,6 +68,8 @@ typedef struct {
     unsigned       nsym;
     const dm_rela *rela, *jmprel;
     uint64_t       relasz, pltsz;
+    const uint64_t *relr;          /* DT_RELR 表（第 73 轮；紧凑相对重定位） */
+    uint64_t       relrsz;         /* DT_RELRSZ */
     void          *dt_init;        /* DT_INIT（模块自身的 _init） */
     void         **init_array;     /* DT_INIT_ARRAY：C++ 全局构造函数数组（第 61 轮加） */
     size_t         init_array_n;   /* 条目数（DT_INIT_ARRAYSZ / 8） */
@@ -71,7 +77,7 @@ typedef struct {
 } dm_module;
 
 typedef struct {
-    uint64_t n_relative, n_abs, n_jump, n_unresolved, n_bad_sym, n_tlsdesc;
+    uint64_t n_relative, n_abs, n_jump, n_unresolved, n_bad_sym, n_tlsdesc, n_relr;
     struct { const char *name; unsigned type; } unres[DM_MAX_UNRES];
     unsigned n_unres;
 } dm_load_stats;
