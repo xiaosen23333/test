@@ -223,6 +223,18 @@ int dm_diag_addr(unsigned long long addr, char *out, int n) {    for (int i = 0;
     return 0;
 }
 
+/* 第 75 轮：addr 落在某模块里时，返回「从这里到模块末尾还剩多少字节」；
+ * 不落在任何模块里返回 0 —— 给 Break 的内存倒出当**读取长度上限**用，
+ * 免得 96 字节的转储读到模块末尾之外（下一页可能没映射，诊断自己崩掉）。 */
+unsigned long long dm_diag_addr_left(unsigned long long addr) {
+    for (int i = 0; i < g_nmods; i++) {
+        unsigned long long b = g_mods[i].base;
+        if (addr >= b && addr < b + g_mods[i].size)
+            return b + g_mods[i].size - addr;
+    }
+    return 0;
+}
+
 /* ---- 门调用记录 ---- */
 #define DM_DIAG_GATE_N 4
 static unsigned long long g_gate_ret[DM_DIAG_GATE_N];

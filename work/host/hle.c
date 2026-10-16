@@ -379,9 +379,31 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                      注：D2R 对低值 reason 直接 _exit(42) 快速失败；我们选择记录后放行 ——
                      让宿主带着状态继续跑能多拿日志，真 Abort 时日志会点名它。 */
         static int n_br;
-        if (n_br++ < 5) dm_diag_mark("[Break] reason=%llx ptr=%llx",
-                                     (unsigned long long)r[DM_REG_X0],
-                                     (unsigned long long)r[DM_REG_X1]);
+        if (n_br++ < 5) {
+            uint64_t p = r[DM_REG_X1];
+            char nm[40] = "?";
+            int inmod = dm_diag_addr(p, nm, (int)sizeof nm);
+            char cl[40] = "?";
+            dm_diag_mark("[Break] reason=%llx ptr=%llx(%s) size=%llx 调用点 %s",
+                         (unsigned long long)r[DM_REG_X0], (unsigned long long)p, nm,
+                         (unsigned long long)r[DM_REG_X2],
+                         dm_diag_addr(r[DM_REG_X30], cl, (int)sizeof cl) ? cl : "?");
+            /* 第 75 轮：把 ptr 指的内存倒出来 —— Break 的 ptr 通常指向中止信息
+             * （nn::diag 的消息串/结构体），看见它才知道为什么中止。
+             * 安全：ptr 落在登记的模块区间里才读；长度以「到模块末尾」封顶。 */
+            if (inmod) {
+                unsigned long long left = dm_diag_addr_left(p);
+                int nread = (left < 96) ? (int)left : 96;
+                const unsigned char *s = (const unsigned char *)p;
+                char t[120]; int k = 0;
+                for (int i = 0; i < nread; i++) {
+                    unsigned char c = s[i];
+                    t[k++] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+                }
+                t[k] = 0;
+                dm_diag_mark("[Break] @%s 前 %d 字节: %s", nm, nread, t);
+            }
+        }
         r[DM_REG_X0] = 0;
         return 0; }
     case 0x27: {  /* OutputDebugString(str, len) —— 真号 0x27（第 59 轮修正：之前记成 0x28）。

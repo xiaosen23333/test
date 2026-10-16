@@ -79,6 +79,9 @@ int  dm_diag_log_fd(void);
 /* 把地址翻成「模块名 + 偏移」。写入 out 并返回 1；不在任何模块内返回 0。
  * **不做任何内存分配、不调 stdio** —— 信号处理里也能用。 */
 int  dm_diag_addr(unsigned long long addr, char *out, int n);
+/* 第 75 轮：addr 落在某模块里 → 返回到模块末尾的剩余字节数（读内存的长度上限）；
+ * 不在任何模块里 → 0。配合 Break 的内存倒出用。 */
+unsigned long long dm_diag_addr_left(unsigned long long addr);
 
 /* 崩了：把信号号 / 故障地址 / PC / LR / SP / x0-x3 写进日志。
  * 本函数只做「拼字符串 + write()」，别的什么都不做（信号安全）。
