@@ -336,6 +336,23 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                 dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) ok -> TLR=%llx 写应答头 0x%lx 探针 1->0",
                              n, (unsigned long long)sess,
                              (unsigned long long)tlr, 0x0000000100000010ULL);
+            } else if (w[4] == 0x49434653 /* "SFCI" */) {
+                /* 第 78 轮：fs（fsp-srv）的 SFCI 请求 —— **写完整应答**。
+                 * 上一轮实测（诊断仪器读出的）：只回成功不给应答数据，
+                 * fs 客户端从数据区读 Result 读到垃圾（0x1a80a，模块 212 描述 10）
+                 * → 游戏判失败 → Break 中止（主线程 + 新线程各一次）。
+                 * 控制头沿用 r60 的形状（0x1_00000010 + 探针清零），
+                 * 数据区整体清零 ⇒ 客户端读到的 Result=0（成功）、句柄=0。
+                 * （真应答要 fs 服务实现 —— OpenFile/ReadFile 的句柄与数据，
+                 *   那是下一步；先让协议层走通。） */
+                h[0] = 0x0000000100000010ULL;
+                w[2] = 0;
+                for (int i = 3; i < 0x60; i++) w[i] = 0;   /* 应答数据区清零 */
+                static unsigned n_fs;
+                if (n_fs++ < 24)
+                    dm_diag_mark("[ipc] fs(SFCI) 会话=%llx cmd=%u → 空成功应答（result=0）",
+                                 (unsigned long long)sess, w[5]);
+                wrote_response = 1;
             } else if (n == 0x21) {
                 /* 其它形态：只读日志，暂不盲写 —— 等日志告诉我们这是什么服务。 */
                 static unsigned n_ssr_other;
