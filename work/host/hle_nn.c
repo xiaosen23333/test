@@ -312,6 +312,9 @@ static const dm_nn_ent g_nn_syms[] = {
     { "_ZN2nn3aoc10InitializeEv",                        (void *)dm_nn_aoc_Initialize },
     { "_ZN2nn4pctl10InitializeEv",                       (void *)dm_nn_pctl_Initialize },
     { "nndiagStartup",                                   (void *)dm_nn_nndiagStartup },
+    /* 第 72 轮：客体 libc 的 DSO 初始化（各模块 _init 里的第一步）。
+       返回 1 ⇒ _init 跳过它自己那遍 init_array；构造函数由宿主的循环跑一遍。 */
+    { "__nnmusl_init_dso",                               (void *)dm_nn_nnmusl_init_dso },
     /* nn::time 整族强制接管（第 65 轮；照 D2R dm/host/hle_time.c）：
        SDK 的 time 客户端会去 sm: 要 "time:u"，宿主没有该服务进程 → 空会话 →
        [Break] reason=0 致命中止。接管后它永远走不到那一步。 */

@@ -605,6 +605,13 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
             extern void dm_nn_nndiagStartup(void);
             return (void *)dm_nn_nndiagStartup;
         }
+        /* 同理（第 72 轮）：`__nnmusl_init_dso` 也不是 _ZN2nn 修饰名，前缀表覆盖不到。
+         * 它是各模块 _init 的第一步；宿主页返回 1 ⇒ _init 跳过自己那遍 init_array
+         * （那遍的表是裸偏移，会 SIGSEGV），构造函数由宿主的 init_array 循环跑一遍。 */
+        if (!strcmp(name, "__nnmusl_init_dso")) {
+            extern int dm_nn_nnmusl_init_dso(void);
+            return (void *)dm_nn_nnmusl_init_dso;
+        }
         static const char *force_prefixes[] = {   /* 20 个服务层 nn:: 命名空间 */
             "_ZN2nn7account",
             "_ZN2nn7friends",

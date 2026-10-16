@@ -77,6 +77,9 @@ void dm_nn_err_InitCtx(void);
 void dm_nn_aoc_Initialize(void);
 void dm_nn_pctl_Initialize(void);
 void dm_nn_nndiagStartup(void);
+/* 第 72 轮：客体 libc 的 DSO 初始化（返回 1 = 已初始化，让各模块 _init 跳过
+ * 它自己那段构造函数循环；构造函数由宿主的 init_array 循环跑）。详见 .c 里的说明。 */
+int  dm_nn_nnmusl_init_dso(void);
 
 /* ---------- 程序化生成的实现表 ---------- */
 void *dm_nn_impl_lookup(const char *name);

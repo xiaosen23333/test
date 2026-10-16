@@ -179,6 +179,28 @@ void dm_nn_aoc_Initialize(void)              { dm_diag_mark("init 接管：aoc::
 void dm_nn_pctl_Initialize(void)             { dm_diag_mark("init 接管：pctl::Initialize（空操作）"); }
 void dm_nn_nndiagStartup(void)               { dm_diag_mark("init 接管：nndiagStartup（空操作）"); }
 
+/* ================= 客体 libc 的 DSO 初始化（第 72 轮接管） =================
+ *
+ * 各模块的 _init（DT_INIT）形状都一样（sdk+0x400 / main+0x10 / …）：
+ *   ① __nnmusl_init_dso(模块信息表…)        ← 若返回 1 → 跳过 ②③ 直接收尾
+ *   ② nn::ro::ProtectRelro(…)                ← 宿主已接管成空操作
+ *   ③ 自己遍历 init_array 调构造函数
+ *
+ * 为什么必须接管（本轮 .ips）：那张「模块信息表」是 **rtld 在装载模块时**填的
+ * （本工程没有 rtld，见第 71 轮），表里全是裸偏移 —— ① 的第一个参数
+ * （sdk+0xb685f0）现在是 0，而 SDK 那份 __nnmusl_init_dso 开头就是
+ * `cbz x0 → return 2` ⇒ 返回 2 ⇒ 标志位 ≠ 1 ⇒ _init 走 ③ ⇒
+ * 拿裸偏移 0xb2f000 当构造函数表指针 → 读 0xb2f000（未映射）SIGSEGV。
+ * 真机上 ① 做的是 musl 的 DSO 登记（dlopen/dlclose/atexit 的 dso 链），
+ * 我们不模拟它；而 ③ 与我们自己的 init_array 循环**重复**（条目基址已由
+ * dm_loader_fix_init_arrays 补好）。
+ * ⇒ 接管成「返回 1」：_init 收尾，构造函数只由宿主跑一遍。 */
+int dm_nn_nnmusl_init_dso(void) {
+    dm_diag_mark("init 接管：__nnmusl_init_dso → 1"
+                 "（DSO 登记不模拟；构造函数由宿主的 init_array 循环跑）");
+    return 1;
+}
+
 /* int nn::oe::GetOperationMode() —— 0 = Handheld, 1 = Console(Docked) */
 int dm_nn_oe_GetOperationMode(void) { return 0; }   /* iPad 当作掌机 */
 
