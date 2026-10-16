@@ -201,6 +201,44 @@ int dm_nn_nnmusl_init_dso(void) {
     return 1;
 }
 
+/* ================= 别名区的栈地址分配器（第 77 轮接管） =================
+ *
+ * 真机 .ips 实证的完整链条：nnMain 里游戏创建 nn::os 线程 →
+ * ThreadManagerImplByHorizon::MapAliasStack →
+ * StackGuardManager::MapAtRandomAddress（在别名区找随机位置放线程栈）→
+ * AddressSpaceAllocatorBase::AllocateSpace —— **返回 0（没有空间）** ⇒
+ * MapAtRandomAddress 返回 1 ⇒ SDK 视为不可能状态 → nn::diag::AbortImpl
+ * → Break → 停车循环（b #0）→ 主线程卡死 → 退后台 10 秒被看门狗杀。
+ *
+ * 为什么返回 0：AllocateSpace 依赖 StackGuardManager 里一段「区域范围」
+ * 内部状态（manager+0xB0/0xC0），真机上由装载器/初始化用别名区信息填好；
+ * 我们的移植没人填（空区间）⇒ AllocateSpace 开头的
+ * `cmp [start],[end]; b.eq → return 0` 直接命中。
+ *
+ * ⇒ 接管成「宿主从别名区（512MB）顺序分配」：64K 对齐、记一个游标。
+ * 返回的地址随后经 commit 回调走 svc 0x2C（MapPhysicalMemory，宿主已实现
+ * —— 把别名页 mprotect 成 R|W）⇒ 线程栈真实可用。 */
+uint64_t dm_nn_addr_alloc_space(uint64_t self, uint64_t a1, uint64_t a2,
+                                uint64_t a3, uint64_t a4) {
+    static uint64_t cur;
+    static int n_log;
+    void *base = 0; size_t cap = 0;
+    extern void dm_guest_alias_range(void **base, size_t *size);   /* hle.c */
+    dm_guest_alias_range(&base, &cap);
+    if (!base || !cap) return 0;
+    if (!cur) cur = (uint64_t)base;
+    uint64_t size = (a1 + 0xffff) & ~(uint64_t)0xffff;   /* 64K 对齐（含 guard 余量） */
+    if (size < 0x10000) size = 0x10000;
+    if (cur + size > (uint64_t)base + cap) return 0;      /* 别名区耗尽 */
+    uint64_t addr = cur;
+    cur += size;
+    (void)self; (void)a2; (void)a3; (void)a4;
+    if (n_log++ < 8)
+        dm_diag_mark("init 接管：AllocateSpace → %#llx（+%#llx，别名区顺序分配）",
+                     (unsigned long long)addr, (unsigned long long)size);
+    return addr;
+}
+
 /* int nn::oe::GetOperationMode() —— 0 = Handheld, 1 = Console(Docked) */
 int dm_nn_oe_GetOperationMode(void) { return 0; }   /* iPad 当作掌机 */
 

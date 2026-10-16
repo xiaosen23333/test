@@ -80,6 +80,11 @@ void dm_nn_nndiagStartup(void);
 /* 第 72 轮：客体 libc 的 DSO 初始化（返回 1 = 已初始化，让各模块 _init 跳过
  * 它自己那段构造函数循环；构造函数由宿主的 init_array 循环跑）。详见 .c 里的说明。 */
 int  dm_nn_nnmusl_init_dso(void);
+/* 第 77 轮：别名区的栈地址分配器（AddressSpaceAllocatorBase::AllocateSpace）。
+ * SDK 里那份依赖未初始化的区域状态（永远返回 0）→ 线程创建即 Abort。
+ * 宿主直接从别名区顺序分配。详见 .c 里的说明。 */
+uint64_t dm_nn_addr_alloc_space(uint64_t self, uint64_t a1, uint64_t a2,
+                                uint64_t a3, uint64_t a4);
 
 /* ---------- 程序化生成的实现表 ---------- */
 void *dm_nn_impl_lookup(const char *name);

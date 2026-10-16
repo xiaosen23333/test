@@ -620,6 +620,13 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
             extern int dm_nn_nnmusl_init_dso(void);
             return (void *)dm_nn_nnmusl_init_dso;
         }
+        /* 同理（第 77 轮）：别名区的栈地址分配器。它虽是 _ZN2nn2os 修饰名，但
+         * nn::os 刻意不在前缀表里（os 的宿主实现是另一套考虑），所以按精确名判。
+         * SDK 那份依赖未初始化的区域状态（永远返回 0）→ 线程创建即 Abort。 */
+        if (!strcmp(name, "_ZN2nn2os6detail25AddressSpaceAllocatorBaseImmE13AllocateSpaceEmmmPFmmE")) {
+            extern uint64_t dm_nn_addr_alloc_space(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+            return (void *)dm_nn_addr_alloc_space;
+        }
         static const char *force_prefixes[] = {   /* 20 个服务层 nn:: 命名空间 */
             "_ZN2nn7account",
             "_ZN2nn7friends",
