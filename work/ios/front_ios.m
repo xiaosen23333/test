@@ -274,6 +274,17 @@ static NSString *log_tail(int want_lines) {
     for (long i = (long)got - 1; i >= 0; i--) {
         if (buf[i] == '\n') { if (++seen > want_lines) break; start = i + 1; }
     }
+
+    /* !! 第 81 轮：崩溃块要从**开头**显示，不能只取最后 N 行 !!
+     * 崩溃块有 25+ 行（信号/PC/LR/参数/最后阶段/最近门调用/栈回溯/栈扫描/线程槽），
+     * 只显示尾部时最先被切掉的恰好是最有用的头部 —— r79、r81 两轮真机照片的第一行
+     * 都已经是从「栈扫描 +0x50」开始，PC/LR/门调用全看不到。
+     * 有崩溃块就把起点挪到它的开头；UILabel 只显示得下十几行，正好是头部。 */
+    {
+        char *last_crash = NULL;
+        for (char *q = buf; (q = strstr(q, "[崩溃] 信号")) != NULL; q++) last_crash = q;
+        if (last_crash && (last_crash - buf) < start) start = last_crash - buf;
+    }
     NSString *s = [NSString stringWithUTF8String:buf + start];
     free(buf);
     return s ?: @"（日志不是合法 UTF-8）";
