@@ -357,8 +357,11 @@ uint64_t dm_plat_tlr_addr(void) {
  *   .ips 实证（18:14）内存账本 = 池 3285 / 客体堆 3252 / 已划 2224 ——
  *   客体堆几乎占了整池，而我们又从池顶划走 2.2GB，两块大面积重叠，
  *   引擎的池会被客体 malloc 写坏（这次的表现就是池对象的 [0x110] 变 0）。
- * 1280 + 768 = 2048MB，留 128MB 余量 ⇒ 2176MB。客体堆因此只剩 ~1109MB。 */
-#define DM_HEAP_BIG_RESERVE (2176ull << 20)
+ * 第 87 轮：预算修正为「预留区大小」本身。
+ * 第 88 轮：2176MB 不够 —— 18:28 的账本显示 已划=2096（1280+768+48）之后还有
+ *   一个 768MB 的池拿不到内存（它的堆基址就是 0，块头 {0, 0x30000000}，
+ *   于是 alloc 算出 0x2feddfb8）。引擎要的是 1280+768+768 = 2816MB。 */
+#define DM_HEAP_BIG_RESERVE (2816ull << 20)
 static uint8_t *g_heap;
 static uint64_t g_heap_cap;
 static uint64_t g_heap_cur;               /* SetHeapSize 记账的大小（GetInfo 用） */

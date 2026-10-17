@@ -341,10 +341,11 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
     {
         extern void dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
                                  uint64_t *last_fail, int *last_err,
-                                 uint64_t *last_big, uint64_t *last_big_ptr, int *last_big_ok);
+                                 uint64_t *last_big, uint64_t *last_big_ptr, int *last_big_ok,
+                                 int *fail_n);
         uint64_t mcap = 0, mcur = 0, mcarved = 0, mfail = 0, mbig = 0, mbigp = 0;
-        int mblocks = 0, merr = 0, mbigok = 0;
-        dm_mem_stats(&mcap, &mcur, &mcarved, &mblocks, &mfail, &merr, &mbig, &mbigp, &mbigok);
+        int mblocks = 0, merr = 0, mbigok = 0, mfailn = 0;
+        dm_mem_stats(&mcap, &mcur, &mcarved, &mblocks, &mfail, &merr, &mbig, &mbigp, &mbigok, &mfailn);
         sb_s(&b, "\n[崩溃] 内存: 池="); sb_dec(&b, (unsigned)(mcap >> 20));
         sb_s(&b, " 堆="); sb_dec(&b, (unsigned)(mcur >> 20));
         sb_s(&b, " 划="); sb_dec(&b, (unsigned)(mcarved >> 20));
@@ -353,7 +354,7 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
         sb_s(&b, mbigok ? "MB->" : "MB!");
         if (mbigok) sb_hex(&b, mbigp);
         sb_s(&b, " 失败="); sb_dec(&b, (unsigned)(mfail >> 20)); sb_s(&b, "/");
-        sb_dec(&b, (unsigned)merr);
+        sb_dec(&b, (unsigned)merr); sb_s(&b, "x"); sb_dec(&b, (unsigned)mfailn);
     }
     /* 第 83 轮：把最后一条诊断（例如 [os] AllocateMemoryBlock 的结果）印在崩溃块里。
      * 目的：真机照片只有 16 行、日志文件不一定方便拷，一行「最近事件」就能定位

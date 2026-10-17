@@ -17,7 +17,7 @@ void   dm_nn_FreeMemoryBlock(void *p, uint64_t size);
 /* 第 85/86 轮：崩溃块里的「内存账本」（池/客体堆/已划走/块数/最近失败/最近大块） */
 void   dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
                     uint64_t *last_fail, int *last_err,
-                    uint64_t *last_big, uint64_t *last_big_ptr, int *last_big_ok);
+                    uint64_t *last_big, uint64_t *last_big_ptr, int *last_big_ok, int *fail_n);
 void   dm_nn_SetMemoryHeapSize(uint64_t size);
 void   dm_nn_QueryMemoryInfo(uint64_t *out);
 void   dm_nn_SetMemoryAllocatorForThreadLocal(void *alloc, void *freefn);
