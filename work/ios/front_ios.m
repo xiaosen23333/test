@@ -33,7 +33,7 @@
  * 用「轮次 + 编译时刻」——编译时刻由编译器给，不用手动维护。 */
 /* 第 81 轮：这一行之前一直写死 r49 —— 真机照片里全是「[r49 ...]」，与轮次对不上，
  * 排查时只能靠时间戳猜版本。以后每轮记得改这里。 */
-#define DM_BUILD_STAMP  "r96 " __DATE__ " " __TIME__
+#define DM_BUILD_STAMP  "r97 " __DATE__ " " __TIME__
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -552,7 +552,12 @@ static void dm_register_host_image(void) {
     for (uint32_t i = 0; i < h->ncmds; i++) {
         if (lc->cmd == LC_SEGMENT_64) {
             const struct segment_command_64 *s = (const struct segment_command_64 *)lc;
-            if (s->vmsize) {
+            /* 第 97 轮：**必须跳过 __PAGEZERO**。它是 4 GB 的保留区（filesize == 0），
+             * 把它算进 span 会让「宿主」这个模块覆盖 4 GB —— 于是所有客体地址
+             * （sdk/main/NmplDLL）都被误标成「宿主+0x…」。
+             * 实证：r97 的日志 `[宿主] 映像 base=0x104ed8000 span=4200976 KB`（= 4.2 GB），
+             * 崩溃行打出 `宿主+0x7cf5ee8` 这种根本不存在于宿主里的偏移。 */
+            if (s->vmsize && s->filesize) {
                 if (s->vmaddr < lo) lo = s->vmaddr;
                 if (s->vmaddr + s->vmsize > hi) hi = s->vmaddr + s->vmsize;
             }
@@ -578,7 +583,7 @@ UIWindow *dm_ios_make_window(void) {    UIWindow *w = [[UIWindow alloc] initWith
     /* 第 95 轮：把**宿主自己的映像**也登记成一个「模块」。
      * 为什么：客体调门之后，很多时间其实跑在宿主代码里（门入口 / HLE 实现）。
      * 之前这种崩溃的 PC 既不在 sdk/main/NmplDLL 里、也没登记，只能打出一个裸地址
-     * （r96 的 .ips：`PC 0x102a264d4` 什么名字都没有，等于没有信息）。
+     * （r97 的 .ips：`PC 0x102a264d4` 什么名字都没有，等于没有信息）。
      * 登记后它会变成 `宿主+0x……`，配上 CI 产物里的符号就能直接定位函数。 */
     dm_register_host_image();
     dm_diag_mark("=== 本次启动 [%s] —— 日志 %s ===", DM_BUILD_STAMP, dm_ios_log_path());

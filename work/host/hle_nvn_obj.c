@@ -87,6 +87,14 @@ static struct {
 } g_obj_stats;
 const void *dm_nvn_obj_stats_ptr(void) { return &g_obj_stats; }
 
+/* Round 97: the caller address of a host hook (MSVC has no __builtin_return_address) */
+#if defined(_MSC_VER)
+#include <intrin.h>
+#define NVN_RET_ADDR() ((void *)_ReturnAddress())
+#else
+#define NVN_RET_ADDR() (__builtin_return_address(0))
+#endif
+
 /* Round 96: never dereference a guest pointer we have not already proven readable.
  *
  * Evidence (r95 crash, host+0x12578 = dm_nvn_BufferInitialize+0x58):
@@ -269,8 +277,9 @@ void dm_nvn_BufferInitialize(void *buf, const void *dev, const void *pool,
      * traced to its call site by size/offset instead of by another crash. */
     static unsigned n_log;
     if (n_log++ < 8)
-        dm_diag_mark("[nvn] BufferInitialize(buf=%p pool=%p off=%llu size=%llu)",
-                     buf, pool, (unsigned long long)offset, (unsigned long long)size);
+        dm_diag_mark("[nvn] BufferInitialize(buf=%p pool=%p off=%llu size=%llu) caller=%p",
+                     buf, pool, (unsigned long long)offset, (unsigned long long)size,
+                     NVN_RET_ADDR());
     nvn_obj_t *o = obj_new(buf, NVN_MAGIC_BUF);
     if (!o) { log_bad_ptr("BufferInitialize(buf)", buf); return; }
     nvn_obj_t *p = obj_of((void *)pool, NVN_MAGIC_POOL);
