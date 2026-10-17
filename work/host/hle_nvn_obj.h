@@ -16,7 +16,12 @@ void *dm_nvn_DeviceGetProcAddress(const void *dev, const char *name);
 void  dm_nvn_DeviceSetDebugLabel(void *dev, const char *label);
 
 /* memory pool */
-void     dm_nvn_MemoryPoolInitialize(void *mp, const void *dev, void *addr, uint64_t size, int flags);
+/* 第 91 轮：真机是 builder 式 —— Initialize 只收 (pool, builder) */
+void     dm_nvn_MemoryPoolBuilderSetDefaults(void *b);
+void     dm_nvn_MemoryPoolBuilderSetDevice(void *b, const void *dev);
+void     dm_nvn_MemoryPoolBuilderSetStorage(void *b, void *mem, uint64_t size);
+void     dm_nvn_MemoryPoolBuilderSetFlags(void *b, int flags);
+void     dm_nvn_MemoryPoolInitialize(void *mp, const void *builder);
 void     dm_nvn_MemoryPoolFinalize(void *mp);
 uint64_t dm_nvn_MemoryPoolGetSize(const void *mp);
 void    *dm_nvn_MemoryPoolGetAddress(const void *mp);

@@ -27,10 +27,14 @@ int main(void) {
     printf("  DeviceGetInteger(API major) -> %d\n", api_major);
 
     printf("\n=== 3) 内存池 + 缓冲（地址计算是关键）===\n");
-    /* 游戏给一块真内存当池 */
+    /* 游戏给一块真内存当池。第 91 轮：改为 builder 式（与真机 ABI 一致） */
     static unsigned char pool_mem[1 << 20];
+    uint64_t builder[4] = { 0, 0, 0, 0 };
     struct { void *p; } pool; memset(&pool, 0, sizeof pool);
-    dm_nvn_MemoryPoolInitialize(&pool, &dev, pool_mem, sizeof pool_mem, 0);
+    dm_nvn_MemoryPoolBuilderSetDefaults(builder);
+    dm_nvn_MemoryPoolBuilderSetDevice(builder, &dev);
+    dm_nvn_MemoryPoolBuilderSetStorage(builder, pool_mem, sizeof pool_mem);
+    dm_nvn_MemoryPoolInitialize(&pool, builder);
     printf("  MemoryPoolInitialize(addr=%p, size=%zu)\n", (void *)pool_mem, sizeof pool_mem);
     printf("  GetAddress -> %s (expect == pool_mem)\n",
            dm_nvn_MemoryPoolGetAddress(&pool) == pool_mem ? "相同 OK" : "不同 <-- 不符");
@@ -70,7 +74,7 @@ int main(void) {
     printf("\n=== 6) 注册进分发表 ===\n");
     dm_nvn_obj_register_all();
     unsigned reg = dm_nvn_registered();
-    printf("  已注册 NVN 实现: %u (expect 29)\n", reg);
+    printf("  已注册 NVN 实现: %u (expect 33)\n", reg);
     /* 用分发链验证：按名字调用应进实现而不是未实现入口。
        第 82 轮：nvnDeviceGetInteger 是「void(dev,item,int*)」，所以经分发要传 &out。 */
     int got_api = -1;
@@ -78,7 +82,7 @@ int main(void) {
                     (uint64_t)(uintptr_t)&got_api, 0, 0);
     printf("  经分发调用 nvnDeviceGetInteger(0x00) -> %d (expect 53)  %s\n",
            got_api, got_api == 53 ? "OK" : "<-- 没进实现");
-    int dispatch_ok = (got_api == 53 && reg == 29);
+    int dispatch_ok = (got_api == 53 && reg == 33);
 
     printf("\n=== 7) bootstrap 应能按名给出实现 ===\n");
     void *p = dm_nvn_bootstrap("nvnBufferGetAddress");

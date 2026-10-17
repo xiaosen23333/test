@@ -155,14 +155,44 @@ void dm_nvn_DeviceSetDebugLabel(void *dev, const char *label) { (void)dev; (void
 
 /* ---------------- memory pool ---------------- */
 
-void dm_nvn_MemoryPoolInitialize(void *mp, const void *dev, void *addr, uint64_t size, int flags) {
-    (void)dev;
+/* !! 第 91 轮：MemoryPool 的**真机 ABI 是 builder 式** !!
+ *
+ *   NVNmemoryPoolBuilder = { dev, mem, size, flags }   （4 × 8 字节）
+ *   nvnMemoryPoolBuilderSetDefaults(b)
+ *   nvnMemoryPoolBuilderSetDevice(b, dev)
+ *   nvnMemoryPoolBuilderSetStorage(b, mem, size)
+ *   nvnMemoryPoolBuilderSetFlags(b, flags)
+ *   nvnMemoryPoolInitialize(pool, b)      ← **只收两个参数**
+ *
+ * 以前我们按 (pool, dev, addr, size, flags) 解析 Initialize —— 引擎传进来的 x1 其实是
+ * builder 指针，于是 pool_addr/pool_size 拿到的是寄存器里的垃圾。
+ * 实证（2026-10-17 的 .ips）：块头 `基址=0x30000000`，正好是一个残留寄存器值；
+ * 正确值应该是 AllocateMemoryBlock 给的那块内存。 */
+#define NVN_POOL_BUILDER_SIZE 0x20
+
+void dm_nvn_MemoryPoolBuilderSetDefaults(void *b) {
+    if (b) memset(b, 0, NVN_POOL_BUILDER_SIZE);
+}
+void dm_nvn_MemoryPoolBuilderSetDevice(void *b, const void *dev) {
+    if (b) *(uint64_t *)((char *)b + 0x00) = (uint64_t)(uintptr_t)dev;
+}
+void dm_nvn_MemoryPoolBuilderSetStorage(void *b, void *mem, uint64_t size) {
+    if (!b) return;
+    *(uint64_t *)((char *)b + 0x08) = (uint64_t)(uintptr_t)mem;
+    *(uint64_t *)((char *)b + 0x10) = size;
+}
+void dm_nvn_MemoryPoolBuilderSetFlags(void *b, int flags) {
+    if (b) *(uint64_t *)((char *)b + 0x18) = (uint64_t)(unsigned)flags;
+}
+
+void dm_nvn_MemoryPoolInitialize(void *mp, const void *builder) {
     g_obj_stats.n_pool_init++;
     nvn_obj_t *o = obj_new(mp, NVN_MAGIC_POOL);
     if (!o) return;
-    o->pool_addr = addr;
-    o->pool_size = size;
-    o->pool_flags = (uint64_t)flags;
+    const char *b = (const char *)builder;
+    o->pool_addr  = b ? *(void **)(uintptr_t)(b + 0x08) : NULL;
+    o->pool_size  = b ? *(uint64_t *)(uintptr_t)(b + 0x10) : 0;
+    o->pool_flags = b ? *(uint64_t *)(uintptr_t)(b + 0x18) : 0;
     o->pool_inited = 1;
 }
 void dm_nvn_MemoryPoolFinalize(void *mp) { obj_del(mp, NVN_MAGIC_POOL); }
@@ -321,6 +351,11 @@ void dm_nvn_obj_register_all(void) {
         /* 第 90 轮：这两个漏了会导致引擎的纹理池「基址=0」（见函数注释） */
         { "nvnMemoryPoolMap",               (void *)dm_nvn_MemoryPoolMap },
         { "nvnMemoryPoolGetBufferAddress",  (void *)dm_nvn_MemoryPoolGetBufferAddress },
+        /* 第 91 轮：builder 式创建内存池（少了这四个，builder 全是 0，池地址也是 0） */
+        { "nvnMemoryPoolBuilderSetDefaults", (void *)dm_nvn_MemoryPoolBuilderSetDefaults },
+        { "nvnMemoryPoolBuilderSetDevice",   (void *)dm_nvn_MemoryPoolBuilderSetDevice },
+        { "nvnMemoryPoolBuilderSetStorage",  (void *)dm_nvn_MemoryPoolBuilderSetStorage },
+        { "nvnMemoryPoolBuilderSetFlags",    (void *)dm_nvn_MemoryPoolBuilderSetFlags },
 
         { "nvnBufferInitialize",        (void *)dm_nvn_BufferInitialize },
         { "nvnBufferFinalize",          (void *)dm_nvn_BufferFinalize },
