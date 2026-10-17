@@ -352,6 +352,13 @@ uint64_t dm_plat_tlr_addr(void) {
 #include <sched.h>
 
 #define DM_APP_POOL  (3285ull << 20)      /* 应用内存池 3285 MB */
+/* 第 86 轮：给 AllocateMemoryBlock 的「大块」（引擎的 1.25GB 大堆 + CGraMemMgr 的 768MB）
+ * 预留的池顶空间。**必须与客体堆不重叠**：
+ *   .ips 实证（18:14）内存账本 = 池 3285 / 客体堆 3252 / 已划 2224 ——
+ *   客体堆几乎占了整池，而我们又从池顶划走 2.2GB，两块大面积重叠，
+ *   引擎的池会被客体 malloc 写坏（这次的表现就是池对象的 [0x110] 变 0）。
+ * 1280 + 768 = 2048MB，留 128MB 余量 ⇒ 2176MB。客体堆因此只剩 ~1109MB。 */
+#define DM_HEAP_BIG_RESERVE (2176ull << 20)
 static uint8_t *g_heap;
 static uint64_t g_heap_cap;
 static uint64_t g_heap_cur;               /* SetHeapSize 记账的大小（GetInfo 用） */
@@ -374,8 +381,11 @@ static int heap_reserve(void) {
 
 int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
     if (heap_reserve()) return -1;
-    /* 第 83 轮：池顶划给 AllocateMemoryBlock 的部分不能再算进客体堆 */
-    if (size > g_heap_cap - g_heap_big) return 1;      /* ResultLimitReached —— 游戏会按 2MB 递减重试 */
+    /* 第 83 轮：池顶划给 AllocateMemoryBlock 的部分不能再算进客体堆。
+       第 86 轮：再扣掉大块预留（DM_HEAP_BIG_RESERVE），保证两者永不重叠。 */
+    uint64_t avail = g_heap_cap > DM_HEAP_BIG_RESERVE ? g_heap_cap - DM_HEAP_BIG_RESERVE : g_heap_cap;
+    if (g_heap_big < avail) avail -= g_heap_big; else avail = 0;
+    if (size > avail) return 1;      /* ResultLimitReached —— 游戏会按 2MB 递减重试 */
     g_heap_cur = size;
     if (base_out) *base_out = (uint64_t)g_heap;
     return 0;
@@ -391,13 +401,15 @@ void *dm_plat_heap_alloc_big(uint64_t size) {
     if (!size || size > DM_HEAP_BIG_MAX) return NULL;
     uint64_t sz = (size + 0x3FFF) & ~0x3FFFull;
     if (heap_reserve()) return NULL;
-    if (g_heap_big + sz > g_heap_cap) {
+    uint64_t avail = g_heap_cap > DM_HEAP_BIG_RESERVE ? g_heap_cap - DM_HEAP_BIG_RESERVE : 0;
+    if (g_heap_big + sz > avail) {
         dm_diag_mark("[os] pool carve %llu MB failed: carved=%lluMB cap=%lluMB heap=%lluMB",
                      (unsigned long long)(sz >> 20), (unsigned long long)(g_heap_big >> 20),
                      (unsigned long long)(g_heap_cap >> 20), (unsigned long long)(g_heap_cur >> 20));
         return NULL;
     }
-    uint64_t off = g_heap_cap - g_heap_big - sz;
+    /* 从「大块预留区」的底部往上划：off 落在 [cap-reserve, cap)，与客体堆 [0,heap) 不重叠 */
+    uint64_t off = g_heap_cap - DM_HEAP_BIG_RESERVE + g_heap_big;
     g_heap_big += sz;
     void *p = g_heap + off;
     dm_diag_mark("[os] big block from pool: %llu MB @ %p (cap=%lluMB carved=%lluMB heap=%lluMB)",
@@ -412,11 +424,14 @@ void *dm_plat_heap_alloc_big(uint64_t size) {
  * D2R 是开局 mem_init() 就把堆/alias/stack 全预留好，所以 GetInfo(6 总内存 /
  * 21 非系统内存) 一开始就是池的真实大小。我们原来是懒加载 —— 首次 SetHeapSize
  * 之前这几个量全是 0，客体拿 0 去算堆大小就算出负数
- * （实证：请求 0xfffffffffe000000 = 0 − 0x2000000）。 */
+ * （实证：请求 0xfffffffffe000000 = 0 − 0x2000000）。
+ * 第 86 轮：对外报的 cap 要扣掉大块预留，否则游戏照着 3.2GB 去 SetHeapSize，
+ * 又会和引擎的大堆重叠（.ips 18:14：客体堆 3252MB + 已划 2224MB 重叠）。 */
 void dm_plat_heap_peek(uint64_t *base, uint64_t *cap, uint64_t *cur) {
     heap_reserve();
+    uint64_t reported = g_heap_cap > DM_HEAP_BIG_RESERVE ? g_heap_cap - DM_HEAP_BIG_RESERVE : g_heap_cap;
     if (base) *base = g_heap ? (uint64_t)g_heap : 0;
-    if (cap)  *cap  = g_heap ? g_heap_cap : 0;
+    if (cap)  *cap  = g_heap ? reported : 0;
     if (cur)  *cur  = g_heap_cur;
 }
 

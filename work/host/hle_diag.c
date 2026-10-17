@@ -326,20 +326,33 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
 
     if (x && nx > 0) {
         sb_s(&b, "\n[崩溃] 参数");
-        for (int i = 0; i < nx; i++) { sb_s(&b, " x"); sb_dec(&b, (unsigned)i); sb_s(&b, "="); sb_hex(&b, x[i]); }
+        for (int i = 0; i < nx && i < 4; i++) { sb_s(&b, " x"); sb_dec(&b, (unsigned)i); sb_s(&b, "="); sb_hex(&b, x[i]); }
+    }
+    /* 第 86 轮：分配器崩溃（CLinkBlockHeap::alloc）需要 x19~x28 才能算出「块基址/剩余/偏移」。
+       参数行只放 x0..x3；这里补一行 x19..x28。 */
+    if (x && nx >= 29) {
+        sb_s(&b, "\n[崩溃] 高寄存器");
+        for (int i = 19; i <= 28; i++) {
+            sb_s(&b, " x"); sb_dec(&b, (unsigned)i); sb_s(&b, "="); sb_hex(&b, x[i]);
+        }
     }
     sb_s(&b, "\n[崩溃] 最后阶段: "); sb_s(&b, g_stage);
-    /* 第 85 轮：内存账本 —— 一眼看出「大块分配为什么失败、堆基址为什么是 0」 */
+    /* 第 85/86 轮：内存账本 —— 一眼看出「大块分配为什么失败、堆基址为什么是 0」 */
     {
         extern void dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
-                                 uint64_t *last_fail, int *last_err);
-        uint64_t mcap = 0, mcur = 0, mcarved = 0, mfail = 0;
-        int mblocks = 0, merr = 0;
-        dm_mem_stats(&mcap, &mcur, &mcarved, &mblocks, &mfail, &merr);
-        sb_s(&b, "\n[崩溃] 内存账本: 池="); sb_dec(&b, (unsigned)(mcap >> 20)); sb_s(&b, "MB 客体堆=");
-        sb_dec(&b, (unsigned)(mcur >> 20)); sb_s(&b, "MB 已划="); sb_dec(&b, (unsigned)(mcarved >> 20));
-        sb_s(&b, "MB 块="); sb_dec(&b, (unsigned)mblocks);
-        sb_s(&b, " 最近失败="); sb_dec(&b, (unsigned)(mfail >> 20)); sb_s(&b, "MB/");
+                                 uint64_t *last_fail, int *last_err,
+                                 uint64_t *last_big, uint64_t *last_big_ptr, int *last_big_ok);
+        uint64_t mcap = 0, mcur = 0, mcarved = 0, mfail = 0, mbig = 0, mbigp = 0;
+        int mblocks = 0, merr = 0, mbigok = 0;
+        dm_mem_stats(&mcap, &mcur, &mcarved, &mblocks, &mfail, &merr, &mbig, &mbigp, &mbigok);
+        sb_s(&b, "\n[崩溃] 内存: 池="); sb_dec(&b, (unsigned)(mcap >> 20));
+        sb_s(&b, " 堆="); sb_dec(&b, (unsigned)(mcur >> 20));
+        sb_s(&b, " 划="); sb_dec(&b, (unsigned)(mcarved >> 20));
+        sb_s(&b, " 块="); sb_dec(&b, (unsigned)mblocks);
+        sb_s(&b, " 大块="); sb_dec(&b, (unsigned)(mbig >> 20));
+        sb_s(&b, mbigok ? "MB->" : "MB!");
+        if (mbigok) sb_hex(&b, mbigp);
+        sb_s(&b, " 失败="); sb_dec(&b, (unsigned)(mfail >> 20)); sb_s(&b, "/");
         sb_dec(&b, (unsigned)merr);
     }
     /* 第 83 轮：把最后一条诊断（例如 [os] AllocateMemoryBlock 的结果）印在崩溃块里。

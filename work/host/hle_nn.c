@@ -130,6 +130,9 @@ static struct { void *p; uint64_t len; int kind; } g_blk[DM_BLK_MAX];
 static int g_blk_n;
 static uint64_t g_last_fail_size;   /* Round 85: last failed AllocateMemoryBlock request */
 static int      g_last_fail_err;
+static uint64_t g_last_big_size;    /* Round 86: last >=256MB request (size/result) */
+static uint64_t g_last_big_ptr;
+static int      g_last_big_ok;
 
 static void blk_add(void *p, uint64_t len, int kind) {
     if (!p) return;
@@ -203,6 +206,9 @@ uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
     }
     if (p) blk_add(p, want, kind);
     if (!p) { g_last_fail_size = size; g_last_fail_err = err; }
+    if (size >= 0x10000000ull) {
+        g_last_big_size = size; g_last_big_ptr = (uint64_t)(uintptr_t)p; g_last_big_ok = p ? 1 : 0;
+    }
     g_nn_stats.bytes_alloc += size;
     if (out_addr) *out_addr = (uint64_t)(uintptr_t)p;
     /* For requests >= 256 MB also record the GUEST caller. __builtin_return_address(0)
@@ -222,7 +228,8 @@ uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
 /* Round 85: memory ledger for the crash block (called from the signal path, so the
  * caller formats it with its own async-signal-safe helpers - no snprintf here). */
 void dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
-                  uint64_t *last_fail, int *last_err) {
+                  uint64_t *last_fail, int *last_err,
+                  uint64_t *last_big, uint64_t *last_big_ptr, int *last_big_ok) {
     uint64_t base = 0, hcap = 0, hcur = 0;
     dm_plat_heap_peek(&base, &hcap, &hcur);
     uint64_t c = 0;
@@ -235,6 +242,9 @@ void dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
     if (blocks) *blocks = nb;
     if (last_fail) *last_fail = g_last_fail_size;
     if (last_err) *last_err = g_last_fail_err;
+    if (last_big) *last_big = g_last_big_size;
+    if (last_big_ptr) *last_big_ptr = g_last_big_ptr;
+    if (last_big_ok) *last_big_ok = g_last_big_ok;
 }
 
 /* void nn::os::FreeMemoryBlock(void *p, size_t size)

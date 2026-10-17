@@ -33,7 +33,7 @@
  * 用「轮次 + 编译时刻」——编译时刻由编译器给，不用手动维护。 */
 /* 第 81 轮：这一行之前一直写死 r49 —— 真机照片里全是「[r49 ...]」，与轮次对不上，
  * 排查时只能靠时间戳猜版本。以后每轮记得改这里。 */
-#define DM_BUILD_STAMP  "r85 " __DATE__ " " __TIME__
+#define DM_BUILD_STAMP  "r86 " __DATE__ " " __TIME__
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -333,7 +333,7 @@ static void status_set(NSString *fmt, ...) {
  * 信号处理里**只能用 write 这一类**：snprintf/malloc 都可能踩到锁或分配器而二次崩溃
  * （那就一点痕迹都留不下了）。所以格式化在 hle_diag.c 里手写、只 write 一次。 */
 static void dm_crash_handler(int sig, siginfo_t *info, void *uctx) {
-    unsigned long long pc = 0, lr = 0, sp = 0, xs[4] = { 0, 0, 0, 0 };
+    unsigned long long pc = 0, lr = 0, sp = 0, xs[29] = { 0 };
     unsigned long long fault = info ? (unsigned long long)(uintptr_t)info->si_addr : 0;
 #if defined(__aarch64__)
     ucontext_t *uc = (ucontext_t *)uctx;
@@ -341,13 +341,14 @@ static void dm_crash_handler(int sig, siginfo_t *info, void *uctx) {
         pc = (unsigned long long)uc->uc_mcontext->__ss.__pc;
         lr = (unsigned long long)uc->uc_mcontext->__ss.__lr;
         sp = (unsigned long long)uc->uc_mcontext->__ss.__sp;
-        for (int i = 0; i < 4; i++)
+        /* 第 86 轮：x0~x28 全拿（崩溃块里的「高寄存器」行要用 x19~x28 算堆块基址） */
+        for (int i = 0; i < 29; i++)
             xs[i] = (unsigned long long)uc->uc_mcontext->__ss.__x[i];
     }
 #else
     (void)uctx;
 #endif
-    dm_diag_crash_line(sig, fault, pc, lr, sp, xs, 4);
+    dm_diag_crash_line(sig, fault, pc, lr, sp, xs, 29);
     /* 第 80 轮：**栈回溯**。
      * 为什么必须有：客体的 LR 在调门时被门 thunk 改写过（thunk 用 x29/x30 现算门地址），
      * 所以崩溃日志里的 LR 永远是 thunk 内部地址 —— 看不出「谁调的」。真正没被破坏的
