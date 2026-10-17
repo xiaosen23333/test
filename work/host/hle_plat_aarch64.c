@@ -401,11 +401,16 @@ void *dm_plat_heap_alloc_big(uint64_t size) {
     if (!size || size > DM_HEAP_BIG_MAX) return NULL;
     uint64_t sz = (size + 0x3FFF) & ~0x3FFFull;
     if (heap_reserve()) return NULL;
-    uint64_t avail = g_heap_cap > DM_HEAP_BIG_RESERVE ? g_heap_cap - DM_HEAP_BIG_RESERVE : 0;
+    /* !! 第 87 轮：这里必须是 DM_HEAP_BIG_RESERVE（2176MB），**不是** cap-RESERVE（1109MB）!!
+     * r86 把「大块预算」误写成 cap-RESERVE，结果引擎 1280MB 的请求 > 1109MB 直接被拒：
+     *   内存: 池=1109 堆=1076 划=16 块=1 大块=1280MB! 失败=1280/12
+     *   → 大堆基址又变 0 → 第 5 步 memset(0x20) 崩（DmGame-2026-10-17-182053.ips）。
+     * 大块区是池顶那 2176MB，和客体堆 [0, cap-RESERVE) 是两块不同的地方。 */
+    uint64_t avail = DM_HEAP_BIG_RESERVE;
     if (g_heap_big + sz > avail) {
-        dm_diag_mark("[os] pool carve %llu MB failed: carved=%lluMB cap=%lluMB heap=%lluMB",
+        dm_diag_mark("[os] pool carve %llu MB failed: carved=%lluMB budget=%lluMB heap=%lluMB",
                      (unsigned long long)(sz >> 20), (unsigned long long)(g_heap_big >> 20),
-                     (unsigned long long)(g_heap_cap >> 20), (unsigned long long)(g_heap_cur >> 20));
+                     (unsigned long long)(avail >> 20), (unsigned long long)(g_heap_cur >> 20));
         return NULL;
     }
     /* 从「大块预留区」的底部往上划：off 落在 [cap-reserve, cap)，与客体堆 [0,heap) 不重叠 */
