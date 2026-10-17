@@ -48,6 +48,14 @@ uint64_t dm_plat_tlr_addr(void);
  * 返回 0 = 成功；1 = 超出应用内存池（ResultLimitReached）；-1 = 分配失败。 */
 int  dm_plat_heap_set_size(uint64_t size, uint64_t *base_out);
 
+/* 第 83 轮：从客体池**顶**划一块给 nn::os::AllocateMemoryBlock（引擎的 1.25GB 大堆）。
+ *
+ * 为什么不用 malloc/mmap：真机实证（DmGame-2026-10-17-173627.ips）宿主再要 1.25GB
+ * 会失败（*out 被写成 0 → main+0x9af0a0 里 memset(0x20,0,0x3e0) 直接崩在第 5 步）。
+ * 进程地址空间里已经有开局预留的 3285MB 客体池（未提交），从池顶划最稳。
+ * 返回的指针 16KB 对齐；不释放（引擎的大堆活到进程结束）。 */
+void *dm_plat_heap_alloc_big(uint64_t size);
+
 /* CreateThread：建宿主 pthread（跑 trampoline：装线程槽 → 等 StartThread → 切栈进客体）。
  * 成功返回 0 并写 *handle_out（0x1001 起）。prio/core 目前只记账。 */
 int  dm_plat_thread_create(uint64_t entry, uint64_t arg, uint64_t sp,
@@ -92,6 +100,7 @@ static uint64_t dm_plat_tlr_addr(void) { return dm_test_tlr_override; }
 static int  dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
     (void)size; if (base_out) *base_out = 0x10000000ull; return 0;   /* 自测用假堆 */
 }
+static void *dm_plat_heap_alloc_big(uint64_t size) { (void)size; return 0; }
 static int  dm_plat_thread_create(uint64_t e, uint64_t a, uint64_t s,
                                   uint64_t p, uint64_t c, uint64_t *h) {
     (void)e; (void)a; (void)s; (void)p; (void)c; if (h) *h = 0; return -1;   /* Windows 不建线程 */

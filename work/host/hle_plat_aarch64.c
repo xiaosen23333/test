@@ -355,6 +355,7 @@ uint64_t dm_plat_tlr_addr(void) {
 static uint8_t *g_heap;
 static uint64_t g_heap_cap;
 static uint64_t g_heap_cur;               /* SetHeapSize 记账的大小（GetInfo 用） */
+static uint64_t g_heap_big;               /* 第 83 轮：池顶划给 AllocateMemoryBlock 的字节数 */
 
 /* 预留客体堆池（只占地址空间，不提交内存）。成功 0 / 失败 -1。 */
 static int heap_reserve(void) {
@@ -373,10 +374,35 @@ static int heap_reserve(void) {
 
 int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
     if (heap_reserve()) return -1;
-    if (size > g_heap_cap) return 1;      /* ResultLimitReached —— 游戏会按 2MB 递减重试 */
+    /* 第 83 轮：池顶划给 AllocateMemoryBlock 的部分不能再算进客体堆 */
+    if (size > g_heap_cap - g_heap_big) return 1;      /* ResultLimitReached —— 游戏会按 2MB 递减重试 */
     g_heap_cur = size;
     if (base_out) *base_out = (uint64_t)g_heap;
     return 0;
+}
+
+/* 第 83 轮：从池顶往下划一块（见 hle_plat.h 的说明）。
+ * 为什么不用 malloc/mmap：真机上再要 1.25GB 会失败，宿主写完 *out=0 后
+ * main+0x9af0a0 立刻在 memset(0x20,0,0x3e0) 崩掉（本次 .ips）。
+ * 池是开局 vm_allocate 预留的 3285MB，划出来只是改记账，不新增地址空间。 */
+#define DM_HEAP_BIG_MAX (1ull << 32)   /* 单块上限 4GB，防呆 */
+void *dm_plat_heap_alloc_big(uint64_t size) {
+    if (!size || size > DM_HEAP_BIG_MAX) return NULL;
+    uint64_t sz = (size + 0x3FFF) & ~0x3FFFull;
+    if (heap_reserve()) return NULL;
+    if (g_heap_big + sz > g_heap_cap) {
+        dm_diag_mark("[os] 池顶划 %llu MB 失败：池已划走 %llu MB / 共 %llu MB",
+                     (unsigned long long)(sz >> 20), (unsigned long long)(g_heap_big >> 20),
+                     (unsigned long long)(g_heap_cap >> 20));
+        return NULL;
+    }
+    uint64_t off = g_heap_cap - g_heap_big - sz;
+    g_heap_big += sz;
+    void *p = g_heap + off;
+    dm_diag_mark("[os] 大块取自客体池顶：%llu MB @ %p（池共 %llu MB，已划走 %llu MB）",
+                 (unsigned long long)(sz >> 20), p,
+                 (unsigned long long)(g_heap_cap >> 20), (unsigned long long)(g_heap_big >> 20));
+    return p;
 }
 
 /* GetInfo 用（第 58 轮）：堆基址 / 池上限 / 已记账大小。

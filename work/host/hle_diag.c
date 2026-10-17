@@ -312,7 +312,7 @@ void dm_diag_hang_line(unsigned long long seconds, unsigned long long pc,
 void dm_diag_crash_line(int sig, unsigned long long fault_addr,
                         unsigned long long pc, unsigned long long lr,
                         unsigned long long sp, const unsigned long long *x, int nx) {
-    char buf[640];
+    char buf[1024];
     sb_t b = { buf, 0, (int)sizeof buf };
     char nm[40];
 
@@ -329,6 +329,10 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
         for (int i = 0; i < nx; i++) { sb_s(&b, " x"); sb_dec(&b, (unsigned)i); sb_s(&b, "="); sb_hex(&b, x[i]); }
     }
     sb_s(&b, "\n[崩溃] 最后阶段: "); sb_s(&b, g_stage);
+    /* 第 83 轮：把最后一条诊断（例如 [os] AllocateMemoryBlock 的结果）印在崩溃块里。
+     * 目的：真机照片只有 16 行、日志文件不一定方便拷，一行「最近事件」就能定位
+     * 「我们的实现到底跑没跑、拿到的是指针还是 NULL」。 */
+    sb_s(&b, "\n[崩溃] 最近事件: "); sb_s(&b, g_event);
     sb_s(&b, "\n[崩溃] 最近门调用: "); sb_gates(&b);
     sb_s(&b, "\n");
     sb_c(&b, 0);

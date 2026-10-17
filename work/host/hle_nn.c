@@ -21,6 +21,11 @@
 #include "hle_nn.h"
 #include "hle_nn_more.h"
 #include "hle_diag.h"   /* 第 82 轮：大块内存分配结果写进设备日志 */
+#include "hle_plat.h"   /* 第 83 轮：mmap 失败时从客体池顶划大块 */
+#if !defined(_WIN32)
+#include <sys/mman.h>
+#include <errno.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -140,26 +145,42 @@ void *dm_nn_AllocateMemoryBlock(uint64_t *out_size, uint64_t size) {
 uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
     g_nn_stats.n_mem_alloc++;
     if (size == 0) size = 0x1000;
-#if defined(_WIN32)
-    void *p = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-#else
+    uint64_t want = (size + 0xFFFFull) & ~0xFFFFull;   /* 64KB 对齐，兼容引擎的 64KB 取整 */
     void *p = NULL;
-    if (posix_memalign(&p, 0x1000, size)) p = NULL;
+    int err = 0;
+#if defined(_WIN32)
+    p = VirtualAlloc(NULL, want, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!p) err = (int)GetLastError();
+#else
+    /* 第 83 轮：先 mmap。真机实证（DmGame-2026-10-17-173627.ips）：上一版 posix_memalign
+       拿 1.25GB 失败 → *out 写 0 → main+0x9af0a0 里 memset(0x20,0,0x3e0) 崩在第 5 步。
+       mmap 不经过 malloc 的区管理，成功率高；失败再退到「客体池顶」。 */
+    p = mmap(NULL, want, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) { err = errno; p = NULL; }
 #endif
+    if (!p && size >= 0x1000000ull) {
+        p = dm_plat_heap_alloc_big(want);   /* 池是开局预留的 3285MB，见 hle_plat.h */
+        if (p) err = 0;
+    }
     g_nn_stats.bytes_alloc += size;
     if (out_addr) *out_addr = (uint64_t)(uintptr_t)p;
-    if (!p) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) 失败", (unsigned long long)(size >> 20));
+    if (!p) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) 失败 errno=%d",
+                         (unsigned long long)(size >> 20), err);
     else if (size >= 0x1000000ull) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) -> %p",
                                                 (unsigned long long)(size >> 20), p);
     return p ? 0 : 0x1003;      /* Result：0 成功 / 0x1003 OutOfMemory */
 }
 
-/* void nn::os::FreeMemoryBlock(void *p, size_t size) */
+/* void nn::os::FreeMemoryBlock(void *p, size_t size)
+ * 第 83 轮：大块现在来自 mmap / 客体池顶，**不能 free()**（会崩）。
+ * 引擎的 1.25GB 大堆活到进程结束，实际不会走到这里；小块的 free 保持原样。 */
 void dm_nn_FreeMemoryBlock(void *p, uint64_t size) {
     (void)size;
     g_nn_stats.n_mem_free++;
+    if (!p) return;
+    if (size >= 0x1000000ull) return;   /* mmap / 池顶的大块：只记账，不释放 */
 #if defined(_WIN32)
-    if (p) VirtualFree(p, 0, MEM_RELEASE);
+    VirtualFree(p, 0, MEM_RELEASE);
 #else
     free(p);
 #endif
