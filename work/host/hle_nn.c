@@ -111,16 +111,49 @@ const void *dm_nn_stats_ptr(void) { return &g_nn_stats; }
 
 /* ================= nn::os ================= */
 
+/* Round 84: keep our own allocation table and free only blocks listed in it.
+ * Evidence (DmGame-2026-10-17-175631.ips): round 83 routed every AllocateMemoryBlock
+ * through mmap/pool, but FreeMemoryBlock only skipped frees for size >= 16 MB. An 8 MB
+ * ROM-cache block from mmap was then passed to Darwin free(), which raised
+ *   ___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED
+ * and called abort() (SIGABRT, backtrace __pthread_kill<-pthread_kill<-abort<-malloc_report).
+ * Now: kind 1 -> munmap/VirtualFree, kind 2 -> free (legacy posix_memalign path),
+ * kind 0 -> pool carve (cannot be released), not in table -> ignore. */
+#if defined(_MSC_VER)
+#include <intrin.h>
+#define DM_RET_ADDR() ((void *)_ReturnAddress())
+#else
+#define DM_RET_ADDR() __builtin_return_address(0)
+#endif
+#define DM_BLK_MAX 1024
+static struct { void *p; uint64_t len; int kind; } g_blk[DM_BLK_MAX];
+static int g_blk_n;
+
+static void blk_add(void *p, uint64_t len, int kind) {
+    if (!p) return;
+    for (int i = 0; i < g_blk_n; i++)
+        if (!g_blk[i].p) { g_blk[i].p = p; g_blk[i].len = len; g_blk[i].kind = kind; return; }
+    if (g_blk_n < DM_BLK_MAX) { g_blk[g_blk_n].p = p; g_blk[g_blk_n].len = len; g_blk[g_blk_n].kind = kind; g_blk_n++; }
+}
+static int blk_take(void *p, uint64_t *len) {
+    for (int i = 0; i < g_blk_n; i++)
+        if (g_blk[i].p == p) { *len = g_blk[i].len; int k = g_blk[i].kind; g_blk[i].p = NULL; return k; }
+    return -1;
+}
+
 /* void* nn::os::AllocateMemoryBlock(size_t *out_size, size_t size)
-   —— Horizon 从堆里分配**对齐到 4KB** 的内存；out_size 回填实际大小。 */
+   —— 旧的自测用接口（返回指针 + 回填大小），真机 ABI 见 dm_nn_AllocateMemoryBlock_out。 */
 void *dm_nn_AllocateMemoryBlock(uint64_t *out_size, uint64_t size) {
     g_nn_stats.n_mem_alloc++;
+    if (size == 0) size = 0x1000;
     if (out_size) *out_size = size;
 #if defined(_WIN32)
-    void *p = VirtualAlloc(NULL, size ? size : 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void *p = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (p) blk_add(p, size, 1);
 #else
     void *p = NULL;
-    if (posix_memalign(&p, 0x1000, size ? size : 0x1000)) p = NULL;
+    if (posix_memalign(&p, 0x1000, size)) p = NULL;
+    if (p) blk_add(p, size, 2);
 #endif
     g_nn_stats.bytes_alloc += size;
     return p;
@@ -147,7 +180,7 @@ uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
     if (size == 0) size = 0x1000;
     uint64_t want = (size + 0xFFFFull) & ~0xFFFFull;   /* 64KB 对齐，兼容引擎的 64KB 取整 */
     void *p = NULL;
-    int err = 0;
+    int err = 0, kind = 1;             /* 1 = mmap/VirtualAlloc（可 munmap）；0 = 池顶（不可释放） */
 #if defined(_WIN32)
     p = VirtualAlloc(NULL, want, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!p) err = (int)GetLastError();
@@ -160,29 +193,50 @@ uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
 #endif
     if (!p && size >= 0x1000000ull) {
         p = dm_plat_heap_alloc_big(want);   /* 池是开局预留的 3285MB，见 hle_plat.h */
-        if (p) err = 0;
+        if (p) { err = 0; kind = 0; }
     }
+    if (p) blk_add(p, want, kind);
     g_nn_stats.bytes_alloc += size;
     if (out_addr) *out_addr = (uint64_t)(uintptr_t)p;
-    if (!p) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) 失败 errno=%d",
-                         (unsigned long long)(size >> 20), err);
+    /* For requests >= 256 MB also record the GUEST caller. __builtin_return_address(0)
+       is the instruction right after the guest's blr (our thunk uses `br`, so x30 is
+       preserved), so subtracting the module base names the requester. */
+    if (size >= 0x10000000ull)
+        dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) caller=%p %s",
+                     (unsigned long long)(size >> 20), DM_RET_ADDR(),
+                     p ? "ok" : "fail");
+    else if (!p) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) fail errno=%d",
+                              (unsigned long long)(size >> 20), err);
     else if (size >= 0x1000000ull) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) -> %p",
                                                 (unsigned long long)(size >> 20), p);
-    return p ? 0 : 0x1003;      /* Result：0 成功 / 0x1003 OutOfMemory */
+    return p ? 0 : 0x1003;      /* Result: 0 = ok / 0x1003 = OutOfMemory */
 }
 
 /* void nn::os::FreeMemoryBlock(void *p, size_t size)
- * 第 83 轮：大块现在来自 mmap / 客体池顶，**不能 free()**（会崩）。
- * 引擎的 1.25GB 大堆活到进程结束，实际不会走到这里；小块的 free 保持原样。 */
+ *
+ * Round 84: only free blocks that we registered ourselves.
+ * Evidence (DmGame-2026-10-17-175631.ips): round 83 moved small blocks to mmap too,
+ * and the "size >= 16 MB" test missed e.g. the 8 MB ROM cache block, so free() on an
+ * mmap pointer raised Darwin's
+ *   ___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED -> abort().
+ * Now: kind 1 -> munmap/VirtualFree, kind 2 -> free, kind 0 (pool carve) -> keep,
+ * and anything not in the table is IGNORED (never hand a guest pointer to Darwin free). */
 void dm_nn_FreeMemoryBlock(void *p, uint64_t size) {
     (void)size;
     g_nn_stats.n_mem_free++;
     if (!p) return;
-    if (size >= 0x1000000ull) return;   /* mmap / 池顶的大块：只记账，不释放 */
+    uint64_t len = 0;
+    int kind = blk_take(p, &len);
+    if (kind < 0) {
+        dm_diag_mark("[os] FreeMemoryBlock(%p) not in table - ignored", p);
+        return;
+    }
+    if (kind == 0) return;             /* pool carve: lives until process exit */
+    if (kind == 2) { free(p); return; }
 #if defined(_WIN32)
     VirtualFree(p, 0, MEM_RELEASE);
 #else
-    free(p);
+    munmap(p, len ? len : 0x1000);
 #endif
 }
 
