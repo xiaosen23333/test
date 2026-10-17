@@ -20,6 +20,7 @@
 #include "hle.h"
 #include "hle_nn.h"
 #include "hle_nn_more.h"
+#include "hle_diag.h"   /* 第 82 轮：大块内存分配结果写进设备日志 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -118,6 +119,39 @@ void *dm_nn_AllocateMemoryBlock(uint64_t *out_size, uint64_t size) {
 #endif
     g_nn_stats.bytes_alloc += size;
     return p;
+}
+
+/* uint64_t nn::os::AllocateMemoryBlock(uint64_t *out_addr, uint64_t size)
+ *
+ * !! 第 82 轮：这是**真机 ABI**，与上面那个「返回指针」的旧实现不同 !!
+ * 证据（sdk.patched.bin）：
+ *   nn::os::AllocateMemoryBlock(sdk+0x143f10) → MemoryHeapManager::AllocateFromHeap
+ *   (sdk+0x145480)；成功时 `str x8, [x21]`（把**地址**写进 out），w0 = 0；
+ *   失败时 w0 = 0x1003 且**不写 out**。
+ * 游戏侧（main+0x9ac510）就是 `bl AllocateMemoryBlock(&out, size)` 之后拿 [out] 当地址用，
+ * 而且**不检查 Result** —— 所以 out 一旦没被写，就会把栈上的垃圾当堆地址。
+ * 本机真机实证（DmGame-2026-10-17-171543.ips）：引擎的 MemoryInterface 把这个「地址」
+ * 交给 CLinkBlockHeap::init，块头变成 {base, 0}，块尾 = 0x30000000，
+ * 之后 CGraTexMgr 一 alloc 就下溢崩在 alloc+0xb4。
+ *
+ * 而且 SDK 那份实现依赖 MemoryHeapManager 的空闲链 —— 这份移植里它从来没被装过内存
+ * （svc SetHeapSize 的池在宿主侧，sdk 的空闲链是空的），所以它必然返回 0x1003。
+ * 因此这里由宿主直接分配（4KB 对齐）并**按真机语义把地址写回 out**，返回 Result。 */
+uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
+    g_nn_stats.n_mem_alloc++;
+    if (size == 0) size = 0x1000;
+#if defined(_WIN32)
+    void *p = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+    void *p = NULL;
+    if (posix_memalign(&p, 0x1000, size)) p = NULL;
+#endif
+    g_nn_stats.bytes_alloc += size;
+    if (out_addr) *out_addr = (uint64_t)(uintptr_t)p;
+    if (!p) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) 失败", (unsigned long long)(size >> 20));
+    else if (size >= 0x1000000ull) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) -> %p",
+                                                (unsigned long long)(size >> 20), p);
+    return p ? 0 : 0x1003;      /* Result：0 成功 / 0x1003 OutOfMemory */
 }
 
 /* void nn::os::FreeMemoryBlock(void *p, size_t size) */
@@ -259,7 +293,7 @@ typedef struct { const char *name; void *fn; } dm_nn_ent;
 
 static const dm_nn_ent g_nn_syms[] = {
     /* nn::os —— 内存 */
-    { "_ZN2nn2os19AllocateMemoryBlockEPmm",              (void *)dm_nn_AllocateMemoryBlock },
+    { "_ZN2nn2os19AllocateMemoryBlockEPmm",              (void *)dm_nn_AllocateMemoryBlock_out },
     { "_ZN2nn2os15FreeMemoryBlockEmm",                   (void *)dm_nn_FreeMemoryBlock },
     { "_ZN2nn2os17SetMemoryHeapSizeEm",                  (void *)dm_nn_SetMemoryHeapSize },
     { "_ZN2nn2os15QueryMemoryInfoEPNS0_10MemoryInfoE",   (void *)dm_nn_QueryMemoryInfo },

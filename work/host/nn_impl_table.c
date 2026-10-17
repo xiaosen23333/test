@@ -93,7 +93,7 @@ static const dm_nn_impl_ent g_nn_impl[] = {
     { "_ZN2nn2os17SetThreadCoreMaskEPNS0_10ThreadTypeEim", (void *)dm_nn_SetThreadCoreMask, "线程" },
     { "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE", (void *)dm_nn_DestroySystemEvent, "系统事件" },
     { "_ZN2nn2os18FinalizeLightEventEPNS0_14LightEventTypeE", (void *)dm_nn_FinalizeLightEvent, "轻量事件" },
-    { "_ZN2nn2os19AllocateMemoryBlockEPmm", (void *)dm_nn_AllocateMemoryBlock, "内存分配" },
+    { "_ZN2nn2os19AllocateMemoryBlockEPmm", (void *)dm_nn_AllocateMemoryBlock_out, "内存分配（真机 ABI：地址写回 *out）" },
     { "_ZN2nn2os19InitializeBusyMutexEPNS0_13BusyMutexTypeE", (void *)dm_nn_InitializeBusyMutex, "忙互斥" },
     { "_ZN2nn2os19InitializeSemaphoreEPNS0_13SemaphoreTypeEii", (void *)dm_nn_InitializeSemaphore, "信号量" },
     { "_ZN2nn2os19TimedWaitLightEventEPNS0_14LightEventTypeENS_8TimeSpanE", (void *)dm_nn_TimedWaitLightEvent, "轻量事件" },

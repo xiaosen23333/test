@@ -10,6 +10,9 @@
 
 /* ---------- nn::os ---------- */
 void  *dm_nn_AllocateMemoryBlock(uint64_t *out_size, uint64_t size);
+/* 第 82 轮：真机 ABI —— 地址写回 *out_addr，返回 Result（0 成功 / 0x1003 失败）。
+   loader.c 对 _ZN2nn2os19AllocateMemoryBlockEPmm 强制接管到这个实现。 */
+uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size);
 void   dm_nn_FreeMemoryBlock(void *p, uint64_t size);
 void   dm_nn_SetMemoryHeapSize(uint64_t size);
 void   dm_nn_QueryMemoryInfo(uint64_t *out);

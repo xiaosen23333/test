@@ -10,7 +10,8 @@ int dm_nvn_devinfo(int item);
 /* device */
 int   dm_nvn_DeviceInitialize(void *dev, const void *builder);
 void  dm_nvn_DeviceFinalize(void *dev);
-int   dm_nvn_DeviceGetInteger(const void *dev, int item);
+/* nvnDeviceGetInteger(device, item, int *out) —— 通过指针写回（第 82 轮按 SDK 原型修正） */
+void  dm_nvn_DeviceGetInteger(const void *dev, int item, int *out);
 void *dm_nvn_DeviceGetProcAddress(const void *dev, const char *name);
 void  dm_nvn_DeviceSetDebugLabel(void *dev, const char *label);
 

@@ -15,24 +15,38 @@
  */
 #include "hle_nvn.h"
 #include "hle_nvn_obj.h"
+#include "hle_diag.h"   /* 第 82 轮：设备项查询写进设备日志（真机看得到） */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ---------------- 设备属性（Tegra X1 实测值） ---------------- */
-
-static const int g_devinfo[0x100] = {
-    [0x00] = 53, [0x01] = 311,          /* API 版本 */
-    [0x02] = 14, [0x03] = 65536, [0x04] = 256, [0x05] = 8, [0x06] = 16, [0x07] = 4,
-    [0x08] = 16, [0x09] = 32, [0x0A] = 16, [0x0B] = 4, [0x0C] = 4, [0x0D] = 4,
-    [0x0E] = 16, [0x0F] = 32, [0x10] = 32, [0x11] = 256, [0x12] = 256, [0x13] = 4,
-    [0x14] = 8, [0x15] = 512, [0x16] = 256, [0x17] = 2, [0x18] = 256, [0x19] = 4096,
-    [0x1A] = 131072, [0x1B] = 4, [0x1C] = 4, [0x1D] = 4, [0x1E] = 4, [0x1F] = 1024,
+/* ---------------- 设备属性（Tegra X1 实测值） ----------------
+ * 来源与 D2R 完全一致（dm/gfx/nvn/hle_nvn.c 的 g_devinfo，nnheaders
+ * nvn_DeviceConstantsNX.h，在 SMO 上逐项调 nvnDeviceGetInteger 得到）。
+ *
+ * !! 第 82 轮：这张表原来只填到 0x1F，而且 0x1B..0x1F 的值与 D2R 不一致。
+ * 引擎的 CGraTexMgr 构造会查 0x0F / 0x10 / 0x11 / 0x12 / 0x25，其中 **0x25 旧表没有 → 返回 0**，
+ * 再乘出一大片 0，最后算出 ~2GB 的纹理池请求 —— 直接导致 CLinkBlockHeap::alloc 下溢崩溃。
+ * 现在补齐到 0x5F（与 D2R 逐项相同）。 */
+static const int g_devinfo[0x60] = {
+    [0x00] = 53, [0x01] = 311,   /* API 版本 */
+    [0x02] = 14, [0x03] = 65536, [0x04] = 256, [0x05] = 8, [0x06] = 16, [0x07] = 4, [0x08] = 16, [0x09] = 32,
+    [0x0A] = 16, [0x0B] = 4, [0x0C] = 4, [0x0D] = 4, [0x0E] = 16, [0x0F] = 32, [0x10] = 32, [0x11] = 256, [0x12] = 256,
+    [0x13] = 4, [0x14] = 8, [0x15] = 512, [0x16] = 256, [0x17] = 2, [0x18] = 256, [0x19] = 4096, [0x1A] = 131072,
+    [0x1B] = 16, [0x1C] = 1536, [0x1D] = 1024, [0x1E] = 64, [0x1F] = 1536, [0x20] = 65535, [0x21] = 65535, [0x22] = 65535,
+    [0x23] = 8, [0x24] = 1048576, [0x25] = 4096, [0x26] = 16, [0x27] = 4096, [0x28] = 1, [0x29] = 1, [0x2A] = 1,
+    [0x2B] = 262144, [0x2C] = 15, [0x2D] = 2048, [0x2E] = 1, [0x2F] = 1, [0x30] = 14, [0x31] = 5, [0x32] = 1, [0x33] = 8,
+    [0x34] = 8, [0x35] = 4, [0x36] = 32, [0x37] = 128, [0x38] = 32, [0x39] = 128, [0x3A] = 65536, [0x3B] = 1, [0x3C] = 4,
+    [0x3D] = 16384, [0x3E] = 134217728, [0x3F] = 2048, [0x40] = 16384, [0x41] = 16384, [0x42] = 1, [0x43] = 1, [0x44] = 1,
+    [0x45] = 1, [0x46] = 5, [0x47] = 1, [0x48] = 1, [0x49] = 1, [0x4A] = 1, [0x4B] = 1, [0x4C] = 1, [0x4D] = 16,
+    [0x4E] = 1024, [0x4F] = 32, [0x50] = 4096, [0x51] = 65536, [0x52] = 65536, [0x53] = 256, [0x54] = 16384,
+    [0x55] = 262144, [0x56] = 4096, [0x57] = 1, [0x58] = 4, [0x59] = 2, [0x5A] = 0, [0x5B] = 4096, [0x5C] = 16384,
+    [0x5D] = 4096, [0x5E] = 128, [0x5F] = 4096,
 };
 
 int dm_nvn_devinfo(int item) {
-    if (item < 0 || item >= 0x100) return 0;
+    if (item < 0 || item >= (int)(sizeof g_devinfo / sizeof g_devinfo[0])) return 0;
     return g_devinfo[item];
 }
 
@@ -109,11 +123,26 @@ int dm_nvn_DeviceInitialize(void *dev, const void *builder) {
 void dm_nvn_DeviceFinalize(void *dev) {
     obj_del(dev, NVN_MAGIC_DEV);
 }
-/* nvnDeviceGetInteger(const NVNdevice*, NVNdeviceInfo item) */
-int dm_nvn_DeviceGetInteger(const void *dev, int item) {
+/* nvnDeviceGetInteger(const NVNdevice*, NVNdeviceInfo what, int *out)
+ *
+ * !! 第 82 轮：签名必须是 (device, item, out) —— **通过指针写回**，不是返回值 !!
+ * 依据：dm/gfx/nvn/nvn_protos.h 的 `typedef void (*NVNT_nvnDeviceGetInteger)(const NVNdevice*, NVNdeviceInfo, int*)`，
+ * 以及真机实证（DmGame-2026-10-17-171543.ips）：Nmp1DLL 的 CGraTexMgr 构造函数就是
+ *     x0 = device; w1 = item; x2 = &out; blr nvnDeviceGetInteger
+ * 旧实现返回 int 且不写 *out ⇒ 引擎读到的是栈上的垃圾，算出 ~2GB 的纹理池请求 ⇒
+ * CLinkBlockHeap::alloc 里 (block_end - size) 下溢，写 0xffffffffb3c6e118 崩。
+ * 修好后同一处查询 0x0F/0x10/0x11/0x12/0x25 得到 32/32/256/256/4096，纹理池请求回到几十 KB。 */
+void dm_nvn_DeviceGetInteger(const void *dev, int item, int *out) {
     (void)dev;
     g_obj_stats.n_dev_query++;
-    return dm_nvn_devinfo(item);
+    int v = dm_nvn_devinfo(item);
+    if (out) *out = v;
+    /* 头几次查询写进日志：下一轮真机日志能直接看到引擎要哪些设备项、我们给了什么 */
+    static unsigned n_log = 0;
+    if (n_log < 12) {
+        n_log++;
+        dm_diag_mark("[nvn] DeviceGetInteger(%#x) -> %d", item, v);
+    }
 }
 /* nvnDeviceGetProcAddress(dev, name) —— 按名返回实现（与 D2R 同语义） */
 void *dm_nvn_DeviceGetProcAddress(const void *dev, const char *name) {

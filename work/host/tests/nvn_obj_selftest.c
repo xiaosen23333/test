@@ -22,7 +22,9 @@ int main(void) {
     struct { void *p; } dev; memset(&dev, 0, sizeof dev);
     int r = dm_nvn_DeviceInitialize(&dev, NULL);
     printf("  DeviceInitialize -> %d (expect 1)\n", r);
-    printf("  DeviceGetInteger(API major) -> %d\n", dm_nvn_DeviceGetInteger(&dev, 0x00));
+    int api_major = -1;
+    dm_nvn_DeviceGetInteger(&dev, 0x00, &api_major);   /* 第 82 轮：写回式签名 */
+    printf("  DeviceGetInteger(API major) -> %d\n", api_major);
 
     printf("\n=== 3) 内存池 + 缓冲（地址计算是关键）===\n");
     /* 游戏给一块真内存当池 */
@@ -69,10 +71,13 @@ int main(void) {
     dm_nvn_obj_register_all();
     unsigned reg = dm_nvn_registered();
     printf("  已注册 NVN 实现: %u (expect 27)\n", reg);
-    /* 用分发链验证：按名字调用应进实现而不是未实现入口 */
-    uint64_t got_api = dm_nvn_dispatch("nvnDeviceGetInteger", (uint64_t)(uintptr_t)&dev, 0x00, 0, 0, 0);
-    printf("  经分发调用 nvnDeviceGetInteger(0x00) -> %llu (expect 53)  %s\n",
-           (unsigned long long)got_api, got_api == 53 ? "OK" : "<-- 没进实现");
+    /* 用分发链验证：按名字调用应进实现而不是未实现入口。
+       第 82 轮：nvnDeviceGetInteger 是「void(dev,item,int*)」，所以经分发要传 &out。 */
+    int got_api = -1;
+    dm_nvn_dispatch("nvnDeviceGetInteger", (uint64_t)(uintptr_t)&dev, 0x00,
+                    (uint64_t)(uintptr_t)&got_api, 0, 0);
+    printf("  经分发调用 nvnDeviceGetInteger(0x00) -> %d (expect 53)  %s\n",
+           got_api, got_api == 53 ? "OK" : "<-- 没进实现");
     int dispatch_ok = (got_api == 53 && reg == 27);
 
     printf("\n=== 7) bootstrap 应能按名给出实现 ===\n");

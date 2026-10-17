@@ -639,6 +639,24 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
             extern uint64_t dm_nn_addr_alloc_space(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
             return (void *)dm_nn_addr_alloc_space;
         }
+        /* !! 第 82 轮：nn::os 的「大块内存」两个 API 也要走宿主 !!
+         * 为什么（.ips 实证 DmGame-2026-10-17-171543）：
+         *   sdk 的 nn::os::AllocateMemoryBlock → MemoryHeapManager::AllocateFromHeap，
+         *   它从 sdk 自己的空闲链上切内存；而这份移植里那条链**从来没装过内存**
+         *   （svc SetHeapSize 的池在宿主侧，sdk 的空闲链是空的）→ 永远返回 0x1003，
+         *   而且失败时**不写 *out**。游戏（main+0x9ac510）不检查 Result，直接把
+         *   栈上的垃圾当「大堆地址」交给 MemoryInterface::initialize →
+         *   引擎的 CLinkBlockHeap 块头变成 {垃圾, 0}、块尾 = 0x30000000 →
+         *   CGraTexMgr 一 alloc 就在 alloc+0xb4 下溢崩（写 0xffffffffb3c6e118）。
+         * 宿主的 dm_nn_AllocateMemoryBlock_out 按**真机 ABI**：地址写回 *out，返回 Result。 */
+        if (!strcmp(name, "_ZN2nn2os19AllocateMemoryBlockEPmm")) {
+            extern uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size);
+            return (void *)dm_nn_AllocateMemoryBlock_out;
+        }
+        if (!strcmp(name, "_ZN2nn2os15FreeMemoryBlockEmm")) {
+            extern void dm_nn_FreeMemoryBlock(void *p, uint64_t size);
+            return (void *)dm_nn_FreeMemoryBlock;
+        }
         static const char *force_prefixes[] = {   /* 20 个服务层 nn:: 命名空间 */
             "_ZN2nn7account",
             "_ZN2nn7friends",
