@@ -31,7 +31,9 @@
 /* !! 构建标记 !! 屏幕第一行与日志里都会带上它。
  * 加它的原因很实际：前一轮我没法确认用户装的是不是新版本，白白猜了一次。
  * 用「轮次 + 编译时刻」——编译时刻由编译器给，不用手动维护。 */
-#define DM_BUILD_STAMP  "r49 " __DATE__ " " __TIME__
+/* 第 81 轮：这一行之前一直写死 r49 —— 真机照片里全是「[r49 ...]」，与轮次对不上，
+ * 排查时只能靠时间戳猜版本。以后每轮记得改这里。 */
+#define DM_BUILD_STAMP  "r81b " __DATE__ " " __TIME__
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
