@@ -91,4 +91,12 @@ void *dm_nn_impl_lookup(const char *name);
 unsigned dm_nn_impl_count(void);
 const char *dm_nn_impl_note(unsigned i);
 
+
+/* ---------- nn::vi (round 94) ---------- */
+int  dm_vi_OpenDefaultDisplay(void **out);
+int  dm_vi_CreateLayer(void **out, void *display);
+int  dm_vi_GetNativeWindow(void **out, void *layer);
+int  dm_vi_GetDisplayVsyncEvent(void *ev, void *display);
+void dm_vi_signal_vsync(void);
+
 #endif /* DM_HLE_NN_MORE_H */

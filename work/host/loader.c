@@ -678,6 +678,7 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
             "_ZN2nn2ec",
             "_ZN2nn2fs",
             "_ZN2nn2oe",
+            "_ZN2nn2vi",          /* round 94: display/layer/native window/vsync */
         };
         int force = !strncmp(name, "_ZN2nn2ro", 9);
         if (!force) {

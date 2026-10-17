@@ -499,6 +499,12 @@ static const dm_nn_ent g_nn_syms[] = {
     { "_ZN2nn4time23StandardUserSystemClock3nowEv",      (void *)dm_nn_time_now },
     { "_ZN2nn4time23StandardUserSystemClock9to_time_tERKNSt3__16chrono10time_pointINS0_17SystemClockTraitsENS3_8durationIlNS2_5ratioILl1ELl1EEEEEEE",
                                                          (void *)dm_nn_time_to_time_t },
+    /* Round 94: nn::vi -- CGraMgrNs::initialize needs display/layer/native window/vsync */
+    { "_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE",        (void *)dm_vi_OpenDefaultDisplay },
+    { "_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE",   (void *)dm_vi_CreateLayer },
+    { "_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE",           (void *)dm_vi_GetNativeWindow },
+    { "_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE",
+                                                              (void *)dm_vi_GetDisplayVsyncEvent },
 };
 
 void *dm_nn_force_lookup(const char *name) {

@@ -33,7 +33,7 @@
  * 用「轮次 + 编译时刻」——编译时刻由编译器给，不用手动维护。 */
 /* 第 81 轮：这一行之前一直写死 r49 —— 真机照片里全是「[r49 ...]」，与轮次对不上，
  * 排查时只能靠时间戳猜版本。以后每轮记得改这里。 */
-#define DM_BUILD_STAMP  "r93 " __DATE__ " " __TIME__
+#define DM_BUILD_STAMP  "r94 " __DATE__ " " __TIME__
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -70,6 +70,7 @@ extern void  dm_host_shutdown(void);
 /* 宿主输入接口（hle_nn_more.c 已实现，Windows 上已单测过） */
 extern void dm_input_set_buttons(uint32_t b);
 extern void dm_input_set_stick(int32_t lx, int32_t ly, int32_t rx, int32_t ry);
+extern void dm_vi_signal_vsync(void);
 extern void dm_input_set_touch(int active, uint32_t x, uint32_t y);
 
 /* NVN 呈现（nvn 对象层） */
@@ -195,6 +196,7 @@ static void touch_xy(UITouch *t, UIView *v, uint32_t *ox, uint32_t *oy) {
      · 在 nvnQueueSubmitCommands 时把录音回放成 MTLCommandBuffer
      · 在 nvnQueuePresentTexture 时 presentDrawable */
 static void frame_tick(void) {
+    dm_vi_signal_vsync();   /* round 94: one guest vsync per frame */
     if (!g_running) return;
     @autoreleasepool {
         dm_host_frame();

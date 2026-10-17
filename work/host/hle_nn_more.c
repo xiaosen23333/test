@@ -382,3 +382,50 @@ int  dm_nn_nifm_stub(void *a1, void *a2, void *a3, void *a4) {
     return 0;
 }
 void dm_nn_nifm_Initialize(void) { g_misc_stats.n_nifm++; }
+
+
+/* ================= nn::vi (round 94) =================
+ *
+ * Why: CGraMgrNs::initialize (Nmp1DLL+0xa6b10) calls the sdk's vi client:
+ *     OpenDefaultDisplay(&display) -> CreateLayer(&layer, display)
+ *     -> GetNativeWindow(&win, layer) -> GetDisplayVsyncEvent(&ev, display)
+ * The sdk client builds its objects from IPC replies; our generic CMIF reply has no
+ * payload, so the Layer object it produced was a bogus pointer (x0=0x10) and
+ * GetNativeWindow crashed at sdk+0x455a44 `ldr x8,[x0,#8]` (fault 0x18).
+ *
+ * We take the four vi entry points over (loader.c forces the prefix) and hand out
+ * fake objects. The "native window" value is a constant because our NVN window layer
+ * also treats it as opaque.
+ */
+static int g_vi_display;
+static int g_vi_layer;
+static void *g_vi_vsync_ev;
+
+int dm_vi_OpenDefaultDisplay(void **out) {
+    if (out) *out = &g_vi_display;
+    dm_diag_mark("[vi] OpenDefaultDisplay -> %p", (void *)&g_vi_display);
+    return 0;
+}
+int dm_vi_CreateLayer(void **out, void *display) {
+    (void)display;
+    if (out) *out = &g_vi_layer;
+    dm_diag_mark("[vi] CreateLayer -> %p", (void *)&g_vi_layer);
+    return 0;
+}
+int dm_vi_GetNativeWindow(void **out, void *layer) {
+    (void)layer;
+    if (out) *out = (void *)0x4E564E57ull;   /* "NVNW": opaque fake native window */
+    dm_diag_mark("[vi] GetNativeWindow -> 0x4E564E57");
+    return 0;
+}
+int dm_vi_GetDisplayVsyncEvent(void *ev, void *display) {
+    (void)display;
+    dm_nn_InitializeSystemEvent(ev, 1);
+    g_vi_vsync_ev = ev;
+    dm_diag_mark("[vi] GetDisplayVsyncEvent -> %p (signalled by the host frame loop)", ev);
+    return 0;
+}
+/* called from the iOS frame tick: one vsync per displayed frame */
+void dm_vi_signal_vsync(void) {
+    if (g_vi_vsync_ev) dm_nn_SignalSystemEvent(g_vi_vsync_ev);
+}
