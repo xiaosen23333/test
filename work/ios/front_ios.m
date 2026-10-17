@@ -33,7 +33,7 @@
  * 用「轮次 + 编译时刻」——编译时刻由编译器给，不用手动维护。 */
 /* 第 81 轮：这一行之前一直写死 r49 —— 真机照片里全是「[r49 ...]」，与轮次对不上，
  * 排查时只能靠时间戳猜版本。以后每轮记得改这里。 */
-#define DM_BUILD_STAMP  "r94 " __DATE__ " " __TIME__
+#define DM_BUILD_STAMP  "r95 " __DATE__ " " __TIME__
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -48,6 +48,8 @@
 #include <ucontext.h>   /* ucontext_t：从信号上下文里取 PC/LR/SP/寄存器 */
 #include <pthread.h>    /* pthread_mach_thread_np：看门狗要采主线程的 PC（第 48 轮） */
 #include <dlfcn.h>      /* dladdr：判断 PC 是不是落在宿主自己里，命中还能给出函数名 */
+#include <mach-o/dyld.h>    /* 第 95 轮：_dyld_get_image_header(0) —— 登记宿主映像 */
+#include <mach-o/loader.h>  /* LC_SEGMENT_64 / segment_command_64 */
 #include <mach/mach.h>          /* thread_get_state —— 采卡住线程的寄存器 */
 #include <mach/thread_act.h>
 #include <mach/arm/thread_status.h>
@@ -537,8 +539,35 @@ static void dm_install_watchdog(void) {
  *   装载 5 个模块（36 MB）+ 24,660 条重定位会拖住主线程，
  *   iOS 的启动看门狗（约 20 秒）会杀进程。
  *   现在：先让窗口可见（用户立刻看到状态文字），装载放后台线程。 */
-UIWindow *dm_ios_make_window(void) {
-    UIWindow *w = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+/* 第 95 轮：登记宿主自己的映像（调用点在 dm_ios_make_window 里）。
+ * 目的：客体调门之后很多时间跑在宿主代码里（门入口 / HLE 实现），这类崩溃的 PC
+ * 既不在 sdk/main/NmplDLL 里，之前只能打出一个裸地址。登记后显示成 `宿主+0x…`，
+ * 配合 CI 产物里的符号（nm）就能定位到函数。 */
+static void dm_register_host_image(void) {
+#if defined(__aarch64__)
+    const struct mach_header_64 *h = (const struct mach_header_64 *)_dyld_get_image_header(0);
+    if (!h) return;
+    const struct load_command *lc = (const struct load_command *)(h + 1);
+    uint64_t lo = ~0ull, hi = 0;
+    for (uint32_t i = 0; i < h->ncmds; i++) {
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *s = (const struct segment_command_64 *)lc;
+            if (s->vmsize) {
+                if (s->vmaddr < lo) lo = s->vmaddr;
+                if (s->vmaddr + s->vmsize > hi) hi = s->vmaddr + s->vmsize;
+            }
+        }
+        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+    }
+    if (hi <= lo) return;
+    /* 用「__TEXT 的加载地址」当基址：偏移 = PC − 基址，和 nm 的输出对得上 */
+    dm_diag_set_module("宿主", (const void *)h, hi - lo);
+    dm_diag_mark("[宿主] 映像 base=%p span=%llu KB", (void *)h,
+                 (unsigned long long)((hi - lo) >> 10));
+#endif
+}
+
+UIWindow *dm_ios_make_window(void) {    UIWindow *w = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     w.rootViewController = [[DmVC alloc] init];
     w.backgroundColor = [UIColor blackColor];
     [w makeKeyAndVisible];
@@ -546,6 +575,12 @@ UIWindow *dm_ios_make_window(void) {
        所以**日志要在这之后才打开**（先读旧的，再开始写新的）。 */
     dm_diag_set_log(dm_ios_log_path());
     dm_diag_set_build(DM_BUILD_STAMP);
+    /* 第 95 轮：把**宿主自己的映像**也登记成一个「模块」。
+     * 为什么：客体调门之后，很多时间其实跑在宿主代码里（门入口 / HLE 实现）。
+     * 之前这种崩溃的 PC 既不在 sdk/main/NmplDLL 里、也没登记，只能打出一个裸地址
+     * （r95 的 .ips：`PC 0x102a264d4` 什么名字都没有，等于没有信息）。
+     * 登记后它会变成 `宿主+0x……`，配上 CI 产物里的符号就能直接定位函数。 */
+    dm_register_host_image();
     dm_diag_mark("=== 本次启动 [%s] —— 日志 %s ===", DM_BUILD_STAMP, dm_ios_log_path());
     /* 崩溃捕获要在装载之前装好 —— 装载与进客体都可能崩 */
     dm_install_crash_handlers();
