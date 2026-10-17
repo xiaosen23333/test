@@ -431,6 +431,38 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                     dm_diag_mark("[sm] GetService(\"%s\") → 句柄 %#x", nm, hnd);
                 wrote_response = 1;
             } else if (n == 0x21) {
+                /* Round 93: generic CMIF reply.
+                 *
+                 * sdk+0xc648c parses a response like this:
+                 *     x8 = buffer + request_data_words*4, 16-byte aligned
+                 *     if ([x8+0x10] != "SFCO") return 0x1a80a;   // bad response
+                 *     result = [x8+0x18]
+                 * so "SFCO" must sit at the SAME word index where the request carried
+                 * "SFCI", and the Result is two words later.
+                 *
+                 * Earlier we only looked for "SFCI" at w[4]; this request had it at w[8]
+                 * (TLR: 01000006 0000000c 00000100 04c4c3d0 10000000 00000000
+                 *  00000000 00000000 49434653 ...), so we fell into the log-only branch
+                 * and the client parsed stale data -> bad pointer -> crash at
+                 * sdk+0x455a44 `ldr x8,[x0,#8]` with x0=0x10.
+                 *
+                 * Now: find "SFCI" in w[0..11], write "SFCO" back at the same index,
+                 * zero the data words, Result = 0. Every CMIF service gets an empty
+                 * successful reply. */
+                int k = -1;
+                for (int i = 0; i < 12; i++) if (w[i] == 0x49434653u) { k = i; break; }
+                if (k >= 0 && k + 2 < 12) {
+                    for (int i = k + 1; i < 12; i++) w[i] = 0;
+                    w[k] = 0x4F434653u;                            /* SFCO */
+                    w[k + 2] = 0;                                  /* Result = 0 */
+                    h[0] = 0x0000000100000010ULL;
+                    w[2] = 0;
+                    wrote_response = 1;
+                    static unsigned n_cmif;
+                    if (n_cmif++ < 16)
+                        dm_diag_mark("[ipc] CMIF generic reply (sess=%llx, SFCI@w%d) -> SFCO result 0; hdr=%08x %08x %08x %08x",
+                                     (unsigned long long)sess, k, w[0], w[1], w[2], w[3]);
+                } else {
                 /* 其它形态：只读日志，暂不盲写 —— 等日志告诉我们这是什么服务。
                  * 第 80 轮：整 12 个字都打出来。真机实证这个「其它形态」是
                  *   00100006 00000008 00000014 0cdfa060 0000001c 00000000
@@ -443,6 +475,7 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                                  n, (unsigned long long)sess,
                                  w[0], w[1], w[2], w[3], w[4], w[5],
                                  w[6], w[7], w[8], w[9], w[10], w[11]);
+            }
             }
         } else {
             static unsigned n_ssr_no_tlr;

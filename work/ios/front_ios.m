@@ -33,7 +33,7 @@
  * 用「轮次 + 编译时刻」——编译时刻由编译器给，不用手动维护。 */
 /* 第 81 轮：这一行之前一直写死 r49 —— 真机照片里全是「[r49 ...]」，与轮次对不上，
  * 排查时只能靠时间戳猜版本。以后每轮记得改这里。 */
-#define DM_BUILD_STAMP  "r92 " __DATE__ " " __TIME__
+#define DM_BUILD_STAMP  "r93 " __DATE__ " " __TIME__
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
