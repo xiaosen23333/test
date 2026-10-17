@@ -408,6 +408,28 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                     dm_diag_mark("[ipc] CMIF(SFCI) 会话=%llx → 已写 SFCO 空成功应答（result=0）",
                                  (unsigned long long)sess);
                 wrote_response = 1;
+            } else if (w[0] == 0x11 && w[1] == 2) {
+                /* 第 92 轮：**sm: GetService(name)** —— 布局从 sdk+0x159130
+                 * (nn::sm::GetServiceHandle) 反读出来：
+                 *   请求：w[0]=0x11  w[1]=2  w[2..3]=服务名（8 字节）
+                 *   应答：w[0]=0x11  w[1]=0x80000001  w[2]=0x20
+                 *         **w[3]=句柄  w[4]=Result**
+                 * 以前这里不写应答，w[4] 留着上一次 CMIF 应答的 "SFCO"（0x4F434653）——
+                 * 客户端把它当 Result，低 22 位不是 0x1015 就 `udf`（SIGILL，
+                 * sdk+0x448f3c）。.ips 实证：x19=0x4F434653、故障地址=udf 地址。 */
+                char nm[9];
+                memcpy(nm, &w[2], 8);
+                nm[8] = 0;
+                static unsigned n_svc;
+                uint32_t hnd = 0xC0001000u + n_svc++;
+                h[0] = 0x8000000100000011ull;
+                w[2] = 0x20;
+                w[3] = hnd;
+                w[4] = 0;              /* Result = 0 */
+                static unsigned n_gs;
+                if (n_gs++ < 16)
+                    dm_diag_mark("[sm] GetService(\"%s\") → 句柄 %#x", nm, hnd);
+                wrote_response = 1;
             } else if (n == 0x21) {
                 /* 其它形态：只读日志，暂不盲写 —— 等日志告诉我们这是什么服务。
                  * 第 80 轮：整 12 个字都打出来。真机实证这个「其它形态」是
