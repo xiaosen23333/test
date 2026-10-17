@@ -18,6 +18,8 @@ void   dm_nn_FreeMemoryBlock(void *p, uint64_t size);
 void   dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
                     uint64_t *last_fail, int *last_err,
                     uint64_t *last_big, uint64_t *last_big_ptr, int *last_big_ok, int *fail_n);
+/* 第 89 轮：>=64MB 分配的历史（老→新），用于判断哪个池没拿到内存 */
+void   dm_big_hist(uint32_t *mb, int *ok, int *n);
 void   dm_nn_SetMemoryHeapSize(uint64_t size);
 void   dm_nn_QueryMemoryInfo(uint64_t *out);
 void   dm_nn_SetMemoryAllocatorForThreadLocal(void *alloc, void *freefn);

@@ -135,6 +135,21 @@ static uint64_t g_last_big_ptr;
 static int      g_last_big_ok;
 static int      g_fail_n;           /* Round 88: how many AllocateMemoryBlock calls failed */
 
+/* Round 89: ring of the last few >=64MB allocations (size, ok). The single "last big"
+ * value is not enough: we need the SEQUENCE to tell whether a pool got memory or not. */
+#define DM_BIG_N 5
+static struct { uint32_t mb; int ok; } g_big_hist[DM_BIG_N];
+static int g_big_hist_n;
+static void big_rec(uint64_t size, int ok) {
+    if (size < (64ull << 20)) return;
+    uint32_t mb = (uint32_t)(size >> 20);
+    if (g_big_hist_n < DM_BIG_N) { g_big_hist[g_big_hist_n].mb = mb; g_big_hist[g_big_hist_n].ok = ok; g_big_hist_n++; }
+    else {
+        for (int i = 1; i < DM_BIG_N; i++) g_big_hist[i - 1] = g_big_hist[i];
+        g_big_hist[DM_BIG_N - 1].mb = mb; g_big_hist[DM_BIG_N - 1].ok = ok;
+    }
+}
+
 static void blk_add(void *p, uint64_t len, int kind) {
     if (!p) return;
     for (int i = 0; i < g_blk_n; i++)
@@ -207,6 +222,7 @@ uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
     }
     if (p) blk_add(p, want, kind);
     if (!p) { g_last_fail_size = size; g_last_fail_err = err; g_fail_n++; }
+    big_rec(size, p ? 1 : 0);
     if (size >= 0x10000000ull) {
         g_last_big_size = size; g_last_big_ptr = (uint64_t)(uintptr_t)p; g_last_big_ok = p ? 1 : 0;
     }
@@ -247,6 +263,16 @@ void dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
     if (last_big_ptr) *last_big_ptr = g_last_big_ptr;
     if (last_big_ok) *last_big_ok = g_last_big_ok;
     if (fail_n) *fail_n = g_fail_n;
+}
+
+/* Round 89: copy the >=64MB allocation history (oldest first) for the crash block. */
+void dm_big_hist(uint32_t *mb, int *ok, int *n) {
+    int cnt = g_big_hist_n;
+    for (int i = 0; i < cnt; i++) {
+        if (mb) mb[i] = g_big_hist[i].mb;
+        if (ok) ok[i] = g_big_hist[i].ok;
+    }
+    if (n) *n = cnt;
 }
 
 /* void nn::os::FreeMemoryBlock(void *p, size_t size)

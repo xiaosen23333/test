@@ -336,6 +336,16 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
             sb_s(&b, " x"); sb_dec(&b, (unsigned)i); sb_s(&b, "="); sb_hex(&b, x[i]);
         }
     }
+    /* 第 89 轮：分配器崩溃时，直接把「块头」读出来（x24 = CLinkBlockHeap 的块指针）。
+     * 只读已登记区间（模块/客体池），读不到就跳过 —— 崩溃路径上绝不能自己再崩。 */
+    if (x && nx >= 25) {
+        unsigned long long v0 = 0, v1 = 0;
+        if (dm_diag_read_u64(x[24], &v0) && dm_diag_read_u64(x[24] + 8, &v1)) {
+            sb_s(&b, "\n[崩溃] 块头: 基址="); sb_hex(&b, v0);
+            sb_s(&b, " 剩余="); sb_hex(&b, v1);
+            sb_s(&b, " 尾="); sb_hex(&b, v0 + v1);
+        }
+    }
     sb_s(&b, "\n[崩溃] 最后阶段: "); sb_s(&b, g_stage);
     /* 第 85/86 轮：内存账本 —— 一眼看出「大块分配为什么失败、堆基址为什么是 0」 */
     {
@@ -355,6 +365,16 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
         if (mbigok) sb_hex(&b, mbigp);
         sb_s(&b, " 失败="); sb_dec(&b, (unsigned)(mfail >> 20)); sb_s(&b, "/");
         sb_dec(&b, (unsigned)merr); sb_s(&b, "x"); sb_dec(&b, (unsigned)mfailn);
+    }
+    /* 第 89 轮：>=64MB 分配的顺序（老→新）。哪个池没拿到内存，一眼就能看出来。 */
+    {
+        extern void dm_big_hist(uint32_t *mb, int *ok, int *n);
+        uint32_t hmb[8]; int hok[8] = { 0 }, hn = 0;
+        dm_big_hist(hmb, hok, &hn);
+        sb_s(&b, "\n[崩溃] 大块序:");
+        for (int i = 0; i < hn && i < 8; i++) {
+            sb_s(&b, " "); sb_dec(&b, (unsigned)hmb[i]); sb_s(&b, hok[i] ? "ok" : "FAIL");
+        }
     }
     /* 第 83 轮：把最后一条诊断（例如 [os] AllocateMemoryBlock 的结果）印在崩溃块里。
      * 目的：真机照片只有 16 行、日志文件不一定方便拷，一行「最近事件」就能定位

@@ -378,6 +378,8 @@ static int heap_reserve(void) {
     }
     g_heap = (uint8_t *)addr;
     g_heap_cap = DM_APP_POOL;
+    /* 第 89 轮：把池登记成「可读区间」，崩溃时才能安全读块头（[x24]/[x24+8]） */
+    dm_diag_set_module("池", g_heap, g_heap_cap);
     dm_diag_mark("客体堆：预留 %llu MB @ %p", DM_APP_POOL >> 20, g_heap);
     return 0;
 }
