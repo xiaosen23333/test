@@ -600,6 +600,18 @@ const void *dm_loader_sym(const dm_module *mods, unsigned nmods, const char *nam
      * ConnectToHipcService，表没填就是裸偏移 → SIGSEGV（第 61 轮 .ips 实证）。
      * 所以不建会话、直接返回；后续各服务接口在用到时再逐个接管。 */
     if (name) {
+        /* !! 第 81 轮：NVN 的总入口必须接管 !!
+         * sdk 自己定义了 nvnBootstrapLoader（sdk+0x503970），不在这里截住的话，
+         * 引擎（NmplDLL 的 nvn::pfncpp_* 指针）拿到的全是 sdk 里的**真 NVN 驱动**：
+         * 它会去开 NvRmGpu，iOS 上必然失败，Device 初始化提前返回失败，留下
+         * [+0x1b10]=0；之后 `ldr x9,[x8,#0x1b10]; ldr x9,[x9,#0x10]` 用 0x10 取地址
+         * → SIGSEGV（r79 与 r81 的 .ips 都是 sdk+0x4d4d10）。
+         * 交了给宿主之后，引擎的 nvn* 全部进 hle_nvn.c 的槽表/实现（与 D2R 的
+         * HLE_FORCE("nvnBootstrapLoader") 同一做法）。 */
+        if (!strcmp(name, "nvnBootstrapLoader")) {
+            extern void *dm_nvn_bootstrap_guest(const char *name);
+            return (void *)dm_nvn_bootstrap_guest;
+        }
         /* !! nndiagStartup 必须**最先**判，且不受前缀表约束 !!
          * 为什么（第 69 轮 .ips 实证）：它不是 _ZN2nn 修饰名，前缀表覆盖不到它。
          * 第 68 轮把 57 条名字清单换成 20 个前缀时把它漏了 —— 于是本分支成了死代码、

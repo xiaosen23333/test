@@ -1,4 +1,4 @@
-﻿/* 宿主图形层 —— NVN 接口层骨架。
+/* 宿主图形层 —— NVN 接口层骨架。
  *
  * 机制（与 dm/gfx/nvn/hle_nvn.c 一致）：
  *   1. 客体（NmplDLL.nro）调用 nvnBootstrapLoader("nvn") 取 NVN 函数表；
@@ -130,6 +130,47 @@ void *dm_nvn_bootstrap(const char *name) {
     int idx = dm_nvn_index_of(name);
     if (idx >= 0) return nvn_slot[idx].fn ? nvn_slot[idx].fn : (void *)dm_nvn_unimpl;
     return NULL;
+}
+
+/* ---------------- 第 81 轮：真正接到客体的入口 ----------------
+ *
+ * !! 为什么必须有这一段（r79 与本次 .ips 是同一面墙的根因）!!
+ *   在此之前 dm_nvn_bootstrap **全仓库没有任何调用点**；装载器按符号名解析，而 sdk
+ *   自己定义了 nvnBootstrapLoader（sdk+0x503970）⇒ 引擎（NmplDLL 里那批
+ *   nvn::pfncpp_* 指针）拿到的全是 sdk 里的**真 NVN 驱动**。真 NVN 要开 NvRmGpu
+ *   （sdk+0x497c70 那套），iOS 上没有 → Device 初始化在 sdk+0x4c6040 提前失败 →
+ *   对象 +0x1b10 一直是 0 → 后续 `ldr x9,[x8,#0x1b10]` 得 0，紧接着
+ *   `ldr x9,[x9,#0x10]` 就 SIGSEGV 在 0x10（r79 与本次 PC 都是 sdk+0x4d4d10）。
+ *   D2R 的做法（dm/gfx/nvn/hle_nvn.c:109）：HLE_FORCE("nvnBootstrapLoader")，
+ *   sdk 的 NVN 驱动整块不执行。这里补上同一件事 —— loader.c 的 dm_loader_sym
+ *   按**精确名**把该符号交给本函数。
+ *
+ * 语义：名字在 538 表里且有实现 → 直接返回宿主实现（调用即进我们的对象层）；
+ *       没实现 / 名字不在表里 → 返回 dm_nvn_nop0（返回 0，不会跳 0），并写日志。
+ *       日志是下一轮的唯一入口：真机日志里会列出引擎取了哪些 NVN、哪些还缺。 */
+uint64_t dm_nvn_nop0(void) { return 0; }
+
+void *dm_nvn_bootstrap_guest(const char *name) {
+    static unsigned n_take = 0, n_miss = 0, n_unknown = 0;
+    if (!name) return NULL;
+    int idx = dm_nvn_index_of(name);
+    if (idx < 0) {
+        /* 538 表是按 NmplDLL 的字符串生成的；出现表外名字说明提取漏了 */
+        if (n_unknown < 8)
+            dm_diag_mark("[nvn] 表外名字：%s（返回 0）", name);
+        n_unknown++;
+        return (void *)dm_nvn_nop0;
+    }
+    if (!nvn_slot[idx].fn) {
+        if (n_miss < 64)
+            dm_diag_mark("[nvn] 未实现：%s（返回 0）", name);
+        n_miss++;
+        return (void *)dm_nvn_nop0;
+    }
+    if (n_take < 12)
+        dm_diag_mark("[nvn] 取用：%s", name);
+    n_take++;
+    return nvn_slot[idx].fn;
 }
 
 /* ---------------- 诊断：列出未实现清单 ---------------- */
