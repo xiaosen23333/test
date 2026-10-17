@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 int main(void) {
+    dm_nvn_SetPtrGuard(0);   /* 自测用栈上的假对象，关掉指针合法性检查 */
     printf("=== 1) 设备属性（Tegra X1 值）===\n");
     printf("  API 版本 major/minor: %d / %d\n", dm_nvn_devinfo(0x00), dm_nvn_devinfo(0x01));
     printf("  最大纹理尺寸 0x03 : %d\n", dm_nvn_devinfo(0x03));

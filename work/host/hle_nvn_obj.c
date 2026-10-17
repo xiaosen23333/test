@@ -87,14 +87,43 @@ static struct {
 } g_obj_stats;
 const void *dm_nvn_obj_stats_ptr(void) { return &g_obj_stats; }
 
+/* Round 96: never dereference a guest pointer we have not already proven readable.
+ *
+ * Evidence (r95 crash, host+0x12578 = dm_nvn_BufferInitialize+0x58):
+ *     ldr x9, [x21]        x21 = 0x5be7f80   <- the engine passed a bogus pool pointer
+ * The host trusted it and died. A bogus pointer from the guest must degrade to a
+ * logged miss, not a SIGSEGV: this is also how we learn which call site produces it.
+ *
+ * dm_diag_addr_left() answers "how many bytes from this address are inside a
+ * registered readable region" (guest modules, and the application pool registered
+ * by hle_plat_aarch64.c). 0 = not safe to touch. */
+static int g_ptr_guard = 1;   /* the Windows selftest uses stack objects, so it turns this off */
+void dm_nvn_SetPtrGuard(int on) { g_ptr_guard = on; }
+
+static int ptr_ok(const void *p) {
+    extern unsigned long long dm_diag_addr_left(unsigned long long);
+    if (!g_ptr_guard) return p != NULL;
+    return p && dm_diag_addr_left((unsigned long long)(uintptr_t)p) >= 8;
+}
+
+static unsigned g_bad_ptr_logs;
+static void log_bad_ptr(const char *what, const void *p) {
+    if (g_bad_ptr_logs++ < 12)
+        dm_diag_mark("[nvn] %s: 客体指针 %p 不在可读区（本轮已拒绝 %u 次）",
+                     what, p, g_bad_ptr_logs);
+}
+
 static nvn_obj_t *obj_of(void *p, uint32_t magic) {
-    if (!p) return NULL;
+    if (!ptr_ok(p)) return NULL;
     nvn_obj_t *o = *(nvn_obj_t **)p;
-    if (!o || o->magic != magic) return NULL;
+    if (!o) return NULL;
+    /* the host object itself lives in our heap, so a plain read is fine once we know
+     * the guest slot was readable; but the stored value may still be garbage */
+    if (o->magic != magic) return NULL;
     return o;
 }
 static nvn_obj_t *obj_new(void *p, uint32_t magic) {
-    if (!p) return NULL;
+    if (!ptr_ok(p)) { log_bad_ptr("obj_new", p); return NULL; }
     nvn_obj_t *o = (nvn_obj_t *)calloc(1, sizeof *o);
     if (!o) return NULL;
     o->magic = magic;
@@ -236,8 +265,14 @@ void dm_nvn_BufferInitialize(void *buf, const void *dev, const void *pool,
                             uint64_t offset, uint64_t size) {
     (void)dev;
     g_obj_stats.n_buf_init++;
+    /* Round 96: report the arguments the first few times so a bogus pool pointer can be
+     * traced to its call site by size/offset instead of by another crash. */
+    static unsigned n_log;
+    if (n_log++ < 8)
+        dm_diag_mark("[nvn] BufferInitialize(buf=%p pool=%p off=%llu size=%llu)",
+                     buf, pool, (unsigned long long)offset, (unsigned long long)size);
     nvn_obj_t *o = obj_new(buf, NVN_MAGIC_BUF);
-    if (!o) return;
+    if (!o) { log_bad_ptr("BufferInitialize(buf)", buf); return; }
     nvn_obj_t *p = obj_of((void *)pool, NVN_MAGIC_POOL);
     o->buf_addr = (p && p->pool_addr ? (uint64_t)(uintptr_t)p->pool_addr : 0) + offset;
     o->buf_size = size;

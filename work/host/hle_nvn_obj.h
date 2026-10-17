@@ -15,6 +15,9 @@ void  dm_nvn_DeviceGetInteger(const void *dev, int item, int *out);
 void *dm_nvn_DeviceGetProcAddress(const void *dev, const char *name);
 void  dm_nvn_DeviceSetDebugLabel(void *dev, const char *label);
 
+/* 第 96 轮：关掉客体指针合法性检查（只给自测用；真机保持开启） */
+void     dm_nvn_SetPtrGuard(int on);
+
 /* memory pool */
 /* 第 91 轮：真机是 builder 式 —— Initialize 只收 (pool, builder) */
 void     dm_nvn_MemoryPoolBuilderSetDefaults(void *b);
