@@ -21,6 +21,9 @@ void     dm_nvn_MemoryPoolFinalize(void *mp);
 uint64_t dm_nvn_MemoryPoolGetSize(const void *mp);
 void    *dm_nvn_MemoryPoolGetAddress(const void *mp);
 uint64_t dm_nvn_MemoryPoolGetFlags(const void *mp);
+/* 第 90 轮：引擎拿纹理池基址靠这两个（以前没实现 → 返回 0 → 堆基址 0） */
+void    *dm_nvn_MemoryPoolMap(const void *mp);
+uint64_t dm_nvn_MemoryPoolGetBufferAddress(const void *mp);
 
 /* buffer */
 void     dm_nvn_BufferInitialize(void *buf, const void *dev, const void *pool, uint64_t off, uint64_t size);

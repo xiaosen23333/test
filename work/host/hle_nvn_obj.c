@@ -178,6 +178,26 @@ uint64_t dm_nvn_MemoryPoolGetFlags(const void *mp) {
     nvn_obj_t *o = obj_of((void *)mp, NVN_MAGIC_POOL);
     return o ? o->pool_flags : 0;
 }
+/* nvnMemoryPoolMap(pool) -> void*
+ *
+ * !! 第 90 轮：这两个函数以前**没实现**（落到 dm_nvn_unimpl 返回 0）。
+ * 引擎建「纹理池」时走的是：
+ *     nvnMemoryPoolMap(pool)            → 拿映射后的 CPU 地址
+ *     nvnMemoryPoolGetBufferAddress(pool) → 拿 GPU 地址
+ * 然后把这个地址当作 CLinkBlockHeap::init 的**堆基址**。
+ * 返回 0 的后果（DmGame-2026-10-17-184731.ips）：
+ *     块头: 基址=0x0 剩余=0x30000000 尾=0x30000000
+ *     → 第一次 alloc 算出 0x2feddfb8（未映射）→ SIGSEGV。
+ * 我们的 NVN 是「零拷贝」：池本来就是宿主内存，映射 = 原样返回池地址。 */
+void *dm_nvn_MemoryPoolMap(const void *mp) {
+    nvn_obj_t *o = obj_of((void *)mp, NVN_MAGIC_POOL);
+    return o ? o->pool_addr : NULL;
+}
+/* nvnMemoryPoolGetBufferAddress(pool) -> NVNbufferAddress（这里 CPU/GPU 地址同值） */
+uint64_t dm_nvn_MemoryPoolGetBufferAddress(const void *mp) {
+    nvn_obj_t *o = obj_of((void *)mp, NVN_MAGIC_POOL);
+    return o ? (uint64_t)(uintptr_t)o->pool_addr : 0;
+}
 
 /* ---------------- buffer ---------------- */
 /* nvnBufferInitialize(buf, dev, pool, offset, size)
@@ -298,6 +318,9 @@ void dm_nvn_obj_register_all(void) {
         { "nvnMemoryPoolGetSize",       (void *)dm_nvn_MemoryPoolGetSize },
         { "nvnMemoryPoolGetAddress",    (void *)dm_nvn_MemoryPoolGetAddress },
         { "nvnMemoryPoolGetFlags",      (void *)dm_nvn_MemoryPoolGetFlags },
+        /* 第 90 轮：这两个漏了会导致引擎的纹理池「基址=0」（见函数注释） */
+        { "nvnMemoryPoolMap",               (void *)dm_nvn_MemoryPoolMap },
+        { "nvnMemoryPoolGetBufferAddress",  (void *)dm_nvn_MemoryPoolGetBufferAddress },
 
         { "nvnBufferInitialize",        (void *)dm_nvn_BufferInitialize },
         { "nvnBufferFinalize",          (void *)dm_nvn_BufferFinalize },
