@@ -381,27 +381,29 @@ int dm_plat_heap_set_size(uint64_t size, uint64_t *base_out) {
     return 0;
 }
 
-/* 第 83 轮：从池顶往下划一块（见 hle_plat.h 的说明）。
- * 为什么不用 malloc/mmap：真机上再要 1.25GB 会失败，宿主写完 *out=0 后
- * main+0x9af0a0 立刻在 memset(0x20,0,0x3e0) 崩掉（本次 .ips）。
- * 池是开局 vm_allocate 预留的 3285MB，划出来只是改记账，不新增地址空间。 */
+/* 第 85 轮：从池顶划一块。
+ * 现在**优先于 mmap**（见 hle_nn.c）：mmap 会额外吃进程地址空间，真机上
+ * 池 3.2GB + mmap 1.25GB + 768MB 就把 VA 顶穿了（.ips：CGraMemMgr 要 768MB 失败，
+ * 堆基址变 0，随后 CLinkBlockHeap::alloc 在 0x2feddfb8 崩）。
+ * 池本来就是「应用的全部内存」，从这里划才和真机一致。 */
 #define DM_HEAP_BIG_MAX (1ull << 32)   /* 单块上限 4GB，防呆 */
 void *dm_plat_heap_alloc_big(uint64_t size) {
     if (!size || size > DM_HEAP_BIG_MAX) return NULL;
     uint64_t sz = (size + 0x3FFF) & ~0x3FFFull;
     if (heap_reserve()) return NULL;
     if (g_heap_big + sz > g_heap_cap) {
-        dm_diag_mark("[os] 池顶划 %llu MB 失败：池已划走 %llu MB / 共 %llu MB",
+        dm_diag_mark("[os] pool carve %llu MB failed: carved=%lluMB cap=%lluMB heap=%lluMB",
                      (unsigned long long)(sz >> 20), (unsigned long long)(g_heap_big >> 20),
-                     (unsigned long long)(g_heap_cap >> 20));
+                     (unsigned long long)(g_heap_cap >> 20), (unsigned long long)(g_heap_cur >> 20));
         return NULL;
     }
     uint64_t off = g_heap_cap - g_heap_big - sz;
     g_heap_big += sz;
     void *p = g_heap + off;
-    dm_diag_mark("[os] 大块取自客体池顶：%llu MB @ %p（池共 %llu MB，已划走 %llu MB）",
+    dm_diag_mark("[os] big block from pool: %llu MB @ %p (cap=%lluMB carved=%lluMB heap=%lluMB)",
                  (unsigned long long)(sz >> 20), p,
-                 (unsigned long long)(g_heap_cap >> 20), (unsigned long long)(g_heap_big >> 20));
+                 (unsigned long long)(g_heap_cap >> 20), (unsigned long long)(g_heap_big >> 20),
+                 (unsigned long long)(g_heap_cur >> 20));
     return p;
 }
 

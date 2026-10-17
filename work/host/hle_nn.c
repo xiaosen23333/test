@@ -128,6 +128,8 @@ const void *dm_nn_stats_ptr(void) { return &g_nn_stats; }
 #define DM_BLK_MAX 1024
 static struct { void *p; uint64_t len; int kind; } g_blk[DM_BLK_MAX];
 static int g_blk_n;
+static uint64_t g_last_fail_size;   /* Round 85: last failed AllocateMemoryBlock request */
+static int      g_last_fail_err;
 
 static void blk_add(void *p, uint64_t len, int kind) {
     if (!p) return;
@@ -180,22 +182,27 @@ uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
     if (size == 0) size = 0x1000;
     uint64_t want = (size + 0xFFFFull) & ~0xFFFFull;   /* 64KB 对齐，兼容引擎的 64KB 取整 */
     void *p = NULL;
-    int err = 0, kind = 1;             /* 1 = mmap/VirtualAlloc（可 munmap）；0 = 池顶（不可释放） */
+    int err = 0, kind = 1;             /* 1 = mmap/VirtualAlloc(freeable); 0 = pool carve(never freed) */
+    /* Round 85: for big blocks try the POOL FIRST. mmap eats extra process address space,
+     * and on device the 3.2 GB pool + 1.25 GB mmap + 768 MB mmap blew the VA limit:
+     * CGraMemMgr's 768 MB request failed, its heap base became 0, and CLinkBlockHeap::alloc
+     * then faulted at 0x2feddfb8 (DmGame-2026-10-17-180546.ips). The pool IS the app memory,
+     * so carving from it is also the faithful behaviour. */
+    if (size >= 0x1000000ull) {
+        p = dm_plat_heap_alloc_big(want);
+        if (p) { kind = 0; err = 0; }
+    }
+    if (!p) {
 #if defined(_WIN32)
-    p = VirtualAlloc(NULL, want, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!p) err = (int)GetLastError();
+        p = VirtualAlloc(NULL, want, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!p) err = (int)GetLastError();
 #else
-    /* 第 83 轮：先 mmap。真机实证（DmGame-2026-10-17-173627.ips）：上一版 posix_memalign
-       拿 1.25GB 失败 → *out 写 0 → main+0x9af0a0 里 memset(0x20,0,0x3e0) 崩在第 5 步。
-       mmap 不经过 malloc 的区管理，成功率高；失败再退到「客体池顶」。 */
-    p = mmap(NULL, want, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED) { err = errno; p = NULL; }
+        p = mmap(NULL, want, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) { err = errno; p = NULL; }
 #endif
-    if (!p && size >= 0x1000000ull) {
-        p = dm_plat_heap_alloc_big(want);   /* 池是开局预留的 3285MB，见 hle_plat.h */
-        if (p) { err = 0; kind = 0; }
     }
     if (p) blk_add(p, want, kind);
+    if (!p) { g_last_fail_size = size; g_last_fail_err = err; }
     g_nn_stats.bytes_alloc += size;
     if (out_addr) *out_addr = (uint64_t)(uintptr_t)p;
     /* For requests >= 256 MB also record the GUEST caller. __builtin_return_address(0)
@@ -210,6 +217,24 @@ uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size) {
     else if (size >= 0x1000000ull) dm_diag_mark("[os] AllocateMemoryBlock(%llu MB) -> %p",
                                                 (unsigned long long)(size >> 20), p);
     return p ? 0 : 0x1003;      /* Result: 0 = ok / 0x1003 = OutOfMemory */
+}
+
+/* Round 85: memory ledger for the crash block (called from the signal path, so the
+ * caller formats it with its own async-signal-safe helpers - no snprintf here). */
+void dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
+                  uint64_t *last_fail, int *last_err) {
+    uint64_t base = 0, hcap = 0, hcur = 0;
+    dm_plat_heap_peek(&base, &hcap, &hcur);
+    uint64_t c = 0;
+    int nb = 0;
+    for (int i = 0; i < g_blk_n; i++)
+        if (g_blk[i].p) { nb++; if (g_blk[i].kind == 0) c += g_blk[i].len; }
+    if (cap) *cap = hcap;
+    if (cur) *cur = hcur;
+    if (carved) *carved = c;
+    if (blocks) *blocks = nb;
+    if (last_fail) *last_fail = g_last_fail_size;
+    if (last_err) *last_err = g_last_fail_err;
 }
 
 /* void nn::os::FreeMemoryBlock(void *p, size_t size)

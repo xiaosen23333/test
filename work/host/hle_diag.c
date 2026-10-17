@@ -329,6 +329,19 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
         for (int i = 0; i < nx; i++) { sb_s(&b, " x"); sb_dec(&b, (unsigned)i); sb_s(&b, "="); sb_hex(&b, x[i]); }
     }
     sb_s(&b, "\n[崩溃] 最后阶段: "); sb_s(&b, g_stage);
+    /* 第 85 轮：内存账本 —— 一眼看出「大块分配为什么失败、堆基址为什么是 0」 */
+    {
+        extern void dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
+                                 uint64_t *last_fail, int *last_err);
+        uint64_t mcap = 0, mcur = 0, mcarved = 0, mfail = 0;
+        int mblocks = 0, merr = 0;
+        dm_mem_stats(&mcap, &mcur, &mcarved, &mblocks, &mfail, &merr);
+        sb_s(&b, "\n[崩溃] 内存账本: 池="); sb_dec(&b, (unsigned)(mcap >> 20)); sb_s(&b, "MB 客体堆=");
+        sb_dec(&b, (unsigned)(mcur >> 20)); sb_s(&b, "MB 已划="); sb_dec(&b, (unsigned)(mcarved >> 20));
+        sb_s(&b, "MB 块="); sb_dec(&b, (unsigned)mblocks);
+        sb_s(&b, " 最近失败="); sb_dec(&b, (unsigned)(mfail >> 20)); sb_s(&b, "MB/");
+        sb_dec(&b, (unsigned)merr);
+    }
     /* 第 83 轮：把最后一条诊断（例如 [os] AllocateMemoryBlock 的结果）印在崩溃块里。
      * 目的：真机照片只有 16 行、日志文件不一定方便拷，一行「最近事件」就能定位
      * 「我们的实现到底跑没跑、拿到的是指针还是 NULL」。 */

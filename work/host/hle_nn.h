@@ -14,6 +14,9 @@ void  *dm_nn_AllocateMemoryBlock(uint64_t *out_size, uint64_t size);
    loader.c 对 _ZN2nn2os19AllocateMemoryBlockEPmm 强制接管到这个实现。 */
 uint64_t dm_nn_AllocateMemoryBlock_out(uint64_t *out_addr, uint64_t size);
 void   dm_nn_FreeMemoryBlock(void *p, uint64_t size);
+/* 第 85 轮：崩溃块里的「内存账本」（池/客体堆/已划走/块数/最近一次失败） */
+void   dm_mem_stats(uint64_t *cap, uint64_t *cur, uint64_t *carved, int *blocks,
+                    uint64_t *last_fail, int *last_err);
 void   dm_nn_SetMemoryHeapSize(uint64_t size);
 void   dm_nn_QueryMemoryInfo(uint64_t *out);
 void   dm_nn_SetMemoryAllocatorForThreadLocal(void *alloc, void *freefn);
