@@ -252,9 +252,11 @@ static unsigned long long g_gate_ret[DM_DIAG_GATE_N];
 static unsigned long long g_gate_total = 0;
 static int                g_gate_pos = 0;
 
-void dm_diag_gate(unsigned long long ret) {
+void dm_diag_gate(unsigned long long ret, unsigned long long site) {
     g_gate_total++;
-    g_gate_ret[g_gate_pos] = ret;
+    /* 第 80 轮：优先存「原指令地址」——返回点是门 thunk，四台一模一样的地址，
+       翻成模块+偏移永远指在同一个小区域，看不出客体在跑什么。 */
+    g_gate_ret[g_gate_pos] = site ? site : ret;
     g_gate_pos = (g_gate_pos + 1) % DM_DIAG_GATE_N;
 }
 
@@ -342,6 +344,63 @@ void dm_diag_crash_line(int sig, unsigned long long fault_addr,
         /* Windows 上不会走这条路（没有真机崩溃），留个能编译的实现 */
         if (g_log) { fputs(buf, g_log); fflush(g_log); }
     }
+#endif
+}
+
+/* 第 80 轮：崩溃时的客体栈回溯。
+ *
+ * !! 为什么需要 !!
+ * 崩溃行里的 LR 是**门 thunk 里的地址**（客体调 svc 时 x30 被 thunk 拿去算门地址，
+ * 我们的 _dm_gate 又在 blr 时把它覆盖成 thunk 的返回点）。于是 LR 永远指向
+ * sdk+0xc7xxxx 那一簇 thunk，「谁调的」永远看不出来。
+ * 真正没被破坏的调用链只有一处：**栈上保存的返回地址**。所以：
+ *   ① 有帧指针就顺着 [fp] / [fp+8] 走；
+ *   ② 另外把 SP 往上 0x600 字节扫一遍，凡是落在已登记模块里的值都当成候选返回地址。
+ * 安全：只读 dm_diag 登记过的区间（读不动就停），输出只用 write(2)。
+ * 绝不能在这里调 snprintf/malloc —— 崩溃路径上它们会二次崩溃，那就一条线索都没了。 */
+void dm_diag_crash_bt(unsigned long long sp, unsigned long long fp) {
+    char buf[1500];
+    sb_t b = { buf, 0, (int)sizeof buf };
+    char nm[40];
+
+    sb_s(&b, "\n[崩溃] 栈回溯（SP="); sb_hex(&b, sp); sb_s(&b, "）");
+
+    /* ① 帧链 */
+    if (fp && dm_diag_addr_left(fp) >= 16) {
+        unsigned long long cur = fp;
+        for (int i = 0; i < 8 && cur; i++) {
+            unsigned long long nx = 0, ra = 0;
+            if (!dm_diag_read_u64(cur, &nx)) break;
+            if (!dm_diag_read_u64(cur + 8, &ra)) break;
+            sb_s(&b, "\n[崩溃] 帧"); sb_dec(&b, (unsigned)i); sb_s(&b, " 返回 ");
+            if (dm_diag_addr(ra, nm, (int)sizeof nm)) sb_s(&b, nm); else sb_hex(&b, ra);
+            if (nx <= cur) break;              /* 不前进就停（防环） */
+            cur = nx;
+        }
+    }
+
+    /* ② 扫栈 —— 帧链断了也能看出个大概（作用域按最近的作用域优先） */
+    if (sp) {
+        int shown = 0;
+        sb_s(&b, "\n[崩溃] 栈扫描");
+        for (unsigned long long a = sp; a < sp + 0x600 && shown < 18; a += 8) {
+            unsigned long long v = 0;
+            if (!dm_diag_read_u64(a, &v)) break;
+            if (dm_diag_addr(v, nm, (int)sizeof nm)) {
+                sb_s(&b, "\n[崩溃]   +"); sb_hex(&b, a - sp);
+                sb_s(&b, " -> "); sb_s(&b, nm);
+                shown++;
+            }
+        }
+        if (!shown) sb_s(&b, "（栈上没有像返回地址的值）");
+    }
+    sb_s(&b, "\n");
+    sb_c(&b, 0);
+
+#if defined(__unix__) || defined(__APPLE__)
+    if (g_logfd >= 0) { ssize_t w = write(g_logfd, buf, (size_t)b.n - 1); (void)w; }
+#else
+    if (g_log) { fputs(buf, g_log); fflush(g_log); }
 #endif
 }
 

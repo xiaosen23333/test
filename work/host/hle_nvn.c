@@ -21,6 +21,7 @@
  */
 #include "hle_nvn.h"
 #include "nvn_names.h"
+#include "hle_diag.h"   /* 第 80 轮：未实现的 NVN 入口必须写进设备日志（stderr 在真机上没人收） */
 
 #include <stdio.h>
 #include <string.h>
@@ -66,7 +67,15 @@ uint64_t dm_nvn_unimpl(int idx, uint64_t x0, uint64_t x1) {
         if (!g_unimpl_seen[idx]) {
             g_unimpl_seen[idx] = 1;
             g_nvn_stats.n_distinct_unimpl++;
-            /* 真机侧这里写日志；Windows 自测里也能看到 */
+            /* !! 第 80 轮：必须写**诊断日志**，不能只写 stderr !!
+             * 真机上 stdout/stderr 没有去处 —— 之前这行等于没写，于是「哪些 NVN
+             * 入口还没实现」在设备上完全看不见。而这一步正是现在的墙：
+             * 游戏已经跑到 NVN 设备初始化（sdk+0x4c5f70 那个 0x1b90 字节对象，
+             * 注册的字段名是 TexLODBias / ShaderCacheInitSize / CubemapAniso…），
+             * 一旦它依赖的某个 nvn 入口返回 0，SDK 侧的 Device 就初始化不完，
+             * 后面 `[device+0x1b10]` 读到 NULL 直接 SIGSEGV（本轮 .ips 实证）。 */
+            dm_diag_mark("[nvn] 未实现: %s（第 %u 个）", nvn_names[idx],
+                         (unsigned)g_nvn_stats.n_distinct_unimpl);
             fprintf(stderr, "[nvn] 未实现: %s\n", nvn_names[idx]);
         }
     }

@@ -102,7 +102,14 @@ void dm_diag_append_crash_text(const char *s, int n);
  * 崩溃/卡死时能看到最后几个门调用是**哪些客体站点** —— 用来区分
  *   「在客体代码里自旋」 与  「死在某个宿主 HLE 里（比如等一个永远不来的锁）」。
  * 只做一次数组写入，很便宜；可以每帧都调。 */
-void dm_diag_gate(unsigned long long ret);
+/* 记一次门调用。site = 原指令地址（改后门表里的 e->orig；0 = 没有就退回存 ret）。
+ * 第 80 轮改：原来只存返回点，而返回点是门 thunk 的地址 —— 4 格全落在同一个
+ * thunk 簇里，等于没记。存 orig 才能看出「客体最后在跑哪段代码」。 */
+void dm_diag_gate(unsigned long long ret, unsigned long long site);
+
+/* 第 80 轮：崩溃时按 SP/FP 回溯客体调用链（只读已登记区间，只 write(2) 输出）。
+ * 为什么不靠 LR：客体调门时 LR 是门 thunk 里的地址；真正的调用链只存在于栈上。 */
+void dm_diag_crash_bt(unsigned long long sp, unsigned long long fp);
 
 /* ---- 看门狗（第 47 轮加）----
  * 主线程**卡住**和**崩溃**是两种完全不同的情况：

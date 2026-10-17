@@ -409,12 +409,18 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
                                  (unsigned long long)sess);
                 wrote_response = 1;
             } else if (n == 0x21) {
-                /* 其它形态：只读日志，暂不盲写 —— 等日志告诉我们这是什么服务。 */
+                /* 其它形态：只读日志，暂不盲写 —— 等日志告诉我们这是什么服务。
+                 * 第 80 轮：整 12 个字都打出来。真机实证这个「其它形态」是
+                 *   00100006 00000008 00000014 0cdfa060 0000001c 00000000
+                 * —— 没有 "SFCI" 魔数、有的是一个指针和两个计数，像是另一套
+                 *   协议（带 A 缓冲描述符的 hipc 请求）。看全 12 个字才能定它的布局。 */
                 static unsigned n_ssr_other;
                 if (n_ssr_other++ < 16)
-                    dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) ok；TLR头=%08x %08x %08x %08x %08x %08x",
+                    dm_diag_mark("[ipc] svc%u SendSyncRequest(会话=%llx) ok；TLR头="
+                                 "%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
                                  n, (unsigned long long)sess,
-                                 w[0], w[1], w[2], w[3], w[4], w[5]);
+                                 w[0], w[1], w[2], w[3], w[4], w[5],
+                                 w[6], w[7], w[8], w[9], w[10], w[11]);
             }
         } else {
             static unsigned n_ssr_no_tlr;
@@ -768,14 +774,20 @@ static int host_svc_impl(uint64_t *r, uint32_t n) {
 /* ---------------- 分发 ---------------- */
 
 void dm_gate_dispatch(dm_host *h, uint64_t ret, uint64_t *regs) {
-    /* 记下这一笔（便宜的一次数组写）：卡死/崩溃时靠它看出最后几个门是哪些客体站点 */
-    dm_diag_gate(ret);
+    const dm_gate_ent *e = dm_host_find(h, ret);
+
+    /* 第 80 轮：门记录改成存**原指令地址（e->orig）**，不再存返回点 `ret`。
+     * 为什么（真机日志实证）：ret 是改写器生成的**门 thunk** 的地址，于是
+     * 「最近门调用」一直是 `sdk+0xc79440 sdk+0xc79198 sdk+0xc79198` 这种
+     * —— 全是同一个 thunk 簇，等于没有信息。`orig` 才是客体真正的调用点
+     * （例如 `sdk+0x4ca884`），崩溃时能直接看出「最后在跑哪段代码」。
+     * 没登记的门（orig=0）仍退回存 ret。 */
+    dm_diag_gate(ret, e ? e->orig : 0);
     /* 第 59 轮：运行期槽核对 + 自愈（发现被改写就恢复并记日志）。真机日志里 K18 槽
        运行中变 0，但没抓到是谁写的 —— 先在这里设保险（每门 4 次槽读，L1 级开销）。
        Windows 自测是空桩（hle_plat.h）。 */
     dm_plat_slots_guard(ret);
 
-    const dm_gate_ent *e = dm_host_find(h, ret);
     if (!e) {
         h->n_unknown++;
         return;                     /* 未登记：不动寄存器，保持客体原行为 */

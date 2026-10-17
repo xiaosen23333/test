@@ -335,6 +335,17 @@ static void dm_crash_handler(int sig, siginfo_t *info, void *uctx) {
     (void)uctx;
 #endif
     dm_diag_crash_line(sig, fault, pc, lr, sp, xs, 4);
+    /* 第 80 轮：**栈回溯**。
+     * 为什么必须有：客体的 LR 在调门时被门 thunk 改写过（thunk 用 x29/x30 现算门地址），
+     * 所以崩溃日志里的 LR 永远是 thunk 内部地址 —— 看不出「谁调的」。真正没被破坏的
+     * 调用链只有一处：**栈上保存的返回地址**。这里用 SP/FP 把它抄出来。
+     * 只在 dm_diag 登记过的区间里读，读不动就停；输出只用 write(2)。 */
+#if defined(__aarch64__)
+    {
+        unsigned long long fp = uc ? (unsigned long long)uc->uc_mcontext->__ss.__fp : 0;
+        dm_diag_crash_bt(sp, fp);
+    }
+#endif
     dm_plat_dump_slots_crash();   /* 第 55 轮：线程槽实值 vs 应填值（PrepareAbort 类崩溃的判据） */
 
     /* 恢复默认处理再重发 —— 让系统照常生成崩溃报告，别把进程留在半死状态 */
